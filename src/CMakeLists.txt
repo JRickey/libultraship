@@ -112,6 +112,12 @@ endif()
 
 target_link_libraries(libultraship PUBLIC prism)
 
+if(NOT DISABLE_SCRIPTING)
+    target_link_libraries(libultraship PUBLIC libtcc libtcc1)
+else()
+    target_compile_definitions(libultraship PUBLIC DISABLE_SCRIPTING)
+endif()
+
 #=================== Compile Options & Defs ===================
 
 target_compile_definitions(libultraship PRIVATE ${GBI_UCODE})

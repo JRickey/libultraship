@@ -10,6 +10,10 @@ set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 option(USE_OPENGLES "Enable GLES3" OFF)
 option(GFX_DEBUG_DISASSEMBLER "Enable libgfxd" OFF)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    set(USE_OPENGLES ON CACHE BOOL "" FORCE)
+endif()
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
 endif()
@@ -65,7 +69,7 @@ if (GFX_DEBUG_DISASSEMBLER)
 endif()
 
 find_package(libzip REQUIRED)
-target_link_libraries(libultraship PRIVATE libzip::zip)
+target_link_libraries(libultraship PUBLIC libzip::zip)
 
 find_package(nlohmann_json REQUIRED)
 target_link_libraries(libultraship PUBLIC nlohmann_json::nlohmann_json)
@@ -77,7 +81,9 @@ find_package(spdlog REQUIRED)
 target_link_libraries(libultraship PUBLIC spdlog::spdlog)
 
 # hidapi for native Raphnet N64 USB adapter (vendored via FetchContent in cmake/dependencies/common.cmake).
-target_link_libraries(libultraship PRIVATE hidapi::hidapi)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    target_link_libraries(libultraship PRIVATE hidapi::hidapi)
+endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(THREADS_PREFER_PTHREAD_FLAG ON)

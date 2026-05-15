@@ -89,15 +89,6 @@ void ControllerDefaultMappings::SetDefaultSDLButtonToAxisDirectionMappings(
         mDefaultSDLButtonToAxisDirectionMappings = defaultSDLButtonToAxisDirectionMappings;
         return;
     }
-
-#if defined(__SWITCH__)
-    mDefaultSDLButtonToAxisDirectionMappings[LEFT_STICK] = {
-        { LEFT, SDL_CONTROLLER_BUTTON_DPAD_LEFT },
-        { RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT },
-        { UP, SDL_CONTROLLER_BUTTON_DPAD_UP },
-        { DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN },
-    };
-#endif
 }
 
 std::unordered_map<CONTROLLERBUTTONS_T, std::vector<std::pair<SDL_GameControllerAxis, int32_t>>>

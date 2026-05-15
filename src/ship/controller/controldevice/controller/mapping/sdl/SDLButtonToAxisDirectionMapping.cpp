@@ -8,34 +8,6 @@
 
 #define MAX_SDL_RANGE (float)INT16_MAX
 
-namespace {
-#if defined(__SWITCH__)
-constexpr uint16_t kNintendoVendorId = 0x057E;
-constexpr uint16_t kJoyConLeftProductId = 0x2006;
-constexpr uint16_t kJoyConRightProductId = 0x2007;
-
-bool ShouldUseSingleJoyConButtonFallback(SDL_GameController* gamepad) {
-    const auto type = SDL_GameControllerGetType(gamepad);
-    if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
-        type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT) {
-        return true;
-    }
-
-    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(gamepad);
-    if (joystick != nullptr) {
-        const uint16_t vendor = SDL_JoystickGetVendor(joystick);
-        const uint16_t product = SDL_JoystickGetProduct(joystick);
-        if (vendor == kNintendoVendorId && (product == kJoyConLeftProductId || product == kJoyConRightProductId)) {
-            return true;
-        }
-    }
-
-    const char* name = SDL_GameControllerName(gamepad);
-    return name != nullptr && SDL_strstr(name, "Joy-Con") != nullptr;
-}
-#endif
-} // namespace
-
 namespace Ship {
 SDLButtonToAxisDirectionMapping::SDLButtonToAxisDirectionMapping(uint8_t portIndex, StickIndex stickIndex,
                                                                  Direction direction, int32_t sdlControllerButton)
@@ -52,12 +24,6 @@ float SDLButtonToAxisDirectionMapping::GetNormalizedAxisDirectionValue() {
     for (const auto& [instanceId, gamepad] :
          Context::GetInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager()->GetConnectedSDLGamepadsForPort(
              mPortIndex)) {
-#if defined(__SWITCH__)
-        if (!ShouldUseSingleJoyConButtonFallback(gamepad)) {
-            continue;
-        }
-#endif
-
         if (SDL_GameControllerGetButton(gamepad, mControllerButton)) {
             return MAX_AXIS_RANGE;
         }

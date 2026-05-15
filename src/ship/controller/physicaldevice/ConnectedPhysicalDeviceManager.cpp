@@ -1,4 +1,5 @@
 #include "ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.h"
+#include <array>
 #include <spdlog/spdlog.h>
 
 namespace Ship {
@@ -69,7 +70,11 @@ void ConnectedPhysicalDeviceManager::HandlePhysicalDeviceDisconnect(int32_t sdlJ
 void ConnectedPhysicalDeviceManager::RefreshConnectedSDLGamepads() {
     mConnectedSDLGamepads.clear();
     mConnectedSDLGamepadNames.clear();
+    mIgnoredInstanceIds.clear();
     static SDL_JoystickGUID sZeroGuid;
+#if defined(__SWITCH__)
+    std::array<bool, 4> portAlreadyAssigned = { false, false, false, false };
+#endif
 
     for (int32_t i = 0; i < SDL_NumJoysticks(); i++) {
 
@@ -130,9 +135,37 @@ void ConnectedPhysicalDeviceManager::RefreshConnectedSDLGamepads() {
         mConnectedSDLGamepads[instanceId] = gamepad;
         mConnectedSDLGamepadNames[instanceId] = gamepadName;
 
+#if defined(__SWITCH__)
+        // Switch has no practical way to do per-port device toggles in the
+        // field, so auto-assign each pad to one player slot by default.
+        for (uint8_t port = 0; port < 4; port++) {
+            mIgnoredInstanceIds[port].insert(instanceId);
+        }
+
+        int32_t assignedPort = SDL_GameControllerGetPlayerIndex(gamepad);
+        const bool playerIndexUsable =
+            assignedPort >= 0 && assignedPort < 4 && !portAlreadyAssigned[static_cast<size_t>(assignedPort)];
+        if (!playerIndexUsable) {
+            assignedPort = -1;
+            for (int32_t candidatePort = 0; candidatePort < 4; candidatePort++) {
+                if (!portAlreadyAssigned[static_cast<size_t>(candidatePort)]) {
+                    assignedPort = candidatePort;
+                    break;
+                }
+            }
+
+            if (assignedPort < 0) {
+                assignedPort = static_cast<int32_t>((mConnectedSDLGamepads.size() - 1) % 4);
+            }
+        }
+
+        mIgnoredInstanceIds[static_cast<uint8_t>(assignedPort)].erase(instanceId);
+        portAlreadyAssigned[static_cast<size_t>(assignedPort)] = true;
+#else
         for (uint8_t port = 1; port < 4; port++) {
             mIgnoredInstanceIds[port].insert(instanceId);
         }
+#endif
     }
 }
 } // namespace Ship

@@ -2,6 +2,57 @@
 #include <array>
 #include <spdlog/spdlog.h>
 
+#if defined(__SWITCH__)
+namespace {
+constexpr uint16_t kNintendoVendorId = 0x057E;
+constexpr uint16_t kJoyConLeftProductId = 0x2006;
+constexpr uint16_t kJoyConRightProductId = 0x2007;
+
+enum class JoyConSide {
+    None,
+    Left,
+    Right,
+};
+
+JoyConSide GetJoyConSide(SDL_GameController* gamepad) {
+    const auto type = SDL_GameControllerGetType(gamepad);
+    if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT) {
+        return JoyConSide::Left;
+    }
+    if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT) {
+        return JoyConSide::Right;
+    }
+
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(gamepad);
+    if (joystick != nullptr) {
+        const uint16_t vendor = SDL_JoystickGetVendor(joystick);
+        const uint16_t product = SDL_JoystickGetProduct(joystick);
+
+        if (vendor == kNintendoVendorId) {
+            if (product == kJoyConLeftProductId) {
+                return JoyConSide::Left;
+            }
+            if (product == kJoyConRightProductId) {
+                return JoyConSide::Right;
+            }
+        }
+    }
+
+    const char* name = SDL_GameControllerName(gamepad);
+    if (name != nullptr) {
+        if (SDL_strstr(name, "Joy-Con (L)") != nullptr || SDL_strstr(name, "Joy-Con Left") != nullptr) {
+            return JoyConSide::Left;
+        }
+        if (SDL_strstr(name, "Joy-Con (R)") != nullptr || SDL_strstr(name, "Joy-Con Right") != nullptr) {
+            return JoyConSide::Right;
+        }
+    }
+
+    return JoyConSide::None;
+}
+} // namespace
+#endif
+
 namespace Ship {
 ConnectedPhysicalDeviceManager::ConnectedPhysicalDeviceManager() {
 }
@@ -74,6 +125,8 @@ void ConnectedPhysicalDeviceManager::RefreshConnectedSDLGamepads() {
     static SDL_JoystickGUID sZeroGuid;
 #if defined(__SWITCH__)
     std::array<bool, 4> portAlreadyAssigned = { false, false, false, false };
+    std::array<bool, 4> portHasJoyConLeft = { false, false, false, false };
+    std::array<bool, 4> portHasJoyConRight = { false, false, false, false };
 #endif
 
     for (int32_t i = 0; i < SDL_NumJoysticks(); i++) {
@@ -143,8 +196,23 @@ void ConnectedPhysicalDeviceManager::RefreshConnectedSDLGamepads() {
         }
 
         int32_t assignedPort = SDL_GameControllerGetPlayerIndex(gamepad);
+        const JoyConSide joyConSide = GetJoyConSide(gamepad);
+        const bool assignedPortInRange = assignedPort >= 0 && assignedPort < 4;
+        bool allowJoyConPairOnPort = false;
+
+        if (assignedPortInRange && joyConSide != JoyConSide::None &&
+            portAlreadyAssigned[static_cast<size_t>(assignedPort)]) {
+            if (joyConSide == JoyConSide::Left) {
+                allowJoyConPairOnPort = portHasJoyConRight[static_cast<size_t>(assignedPort)] &&
+                                        !portHasJoyConLeft[static_cast<size_t>(assignedPort)];
+            } else {
+                allowJoyConPairOnPort = portHasJoyConLeft[static_cast<size_t>(assignedPort)] &&
+                                        !portHasJoyConRight[static_cast<size_t>(assignedPort)];
+            }
+        }
+
         const bool playerIndexUsable =
-            assignedPort >= 0 && assignedPort < 4 && !portAlreadyAssigned[static_cast<size_t>(assignedPort)];
+            assignedPortInRange && (!portAlreadyAssigned[static_cast<size_t>(assignedPort)] || allowJoyConPairOnPort);
         if (!playerIndexUsable) {
             assignedPort = -1;
             for (int32_t candidatePort = 0; candidatePort < 4; candidatePort++) {
@@ -161,6 +229,11 @@ void ConnectedPhysicalDeviceManager::RefreshConnectedSDLGamepads() {
 
         mIgnoredInstanceIds[static_cast<uint8_t>(assignedPort)].erase(instanceId);
         portAlreadyAssigned[static_cast<size_t>(assignedPort)] = true;
+        if (joyConSide == JoyConSide::Left) {
+            portHasJoyConLeft[static_cast<size_t>(assignedPort)] = true;
+        } else if (joyConSide == JoyConSide::Right) {
+            portHasJoyConRight[static_cast<size_t>(assignedPort)] = true;
+        }
 #else
         for (uint8_t port = 1; port < 4; port++) {
             mIgnoredInstanceIds[port].insert(instanceId);

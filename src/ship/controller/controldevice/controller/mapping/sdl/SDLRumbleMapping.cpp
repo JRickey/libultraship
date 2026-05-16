@@ -76,7 +76,7 @@ SwitchVibrationRoutingCandidates MakeRoutingCandidates(const SwitchVibrationRout
     return candidates;
 }
 
-SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameController* gamepad) {
+SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameController* gamepad, uint8_t portIndex) {
     SwitchVibrationRoutingCandidates candidates =
         MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadHandheld, 2 },
                               { HidNpadStyleTag_NpadFullKey, 2 });
@@ -97,13 +97,25 @@ SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameCon
 
     const char* name = SDL_GameControllerName(gamepad);
     if (name != nullptr && SDL_strstr(name, "Combined Joy-Cons") != nullptr) {
-        // In handheld mode, combined Joy-Cons can report through handheld style.
-        candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
-                                           { HidNpadStyleTag_NpadFullKey, 2 });
+        if (portIndex == 0) {
+            // Keep handheld-first for P1 attached mode compatibility.
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
+                                               { HidNpadStyleTag_NpadFullKey, 2 });
+        } else {
+            // Detached multiplayer should target JoyDual first so both Joy-Con motors run.
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadHandheld, 2 },
+                                               { HidNpadStyleTag_NpadFullKey, 2 });
+        }
     } else if (name != nullptr && SDL_strstr(name, "Switch Controller") != nullptr) {
-        // Generic Switch Controller labels are common in handheld mode.
-        candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
-                                           { HidNpadStyleTag_NpadFullKey, 2 });
+        if (portIndex == 0) {
+            // Keep handheld-first for P1 attached mode compatibility.
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
+                                               { HidNpadStyleTag_NpadFullKey, 2 });
+        } else {
+            // Detached multiplayer should target JoyDual first so both Joy-Con motors run.
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadHandheld, 2 },
+                                               { HidNpadStyleTag_NpadFullKey, 2 });
+        }
     }
 
     return candidates;
@@ -112,24 +124,54 @@ SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameCon
 bool SendSwitchHidVibration(SDL_GameController* gamepad, uint8_t portIndex, float lowAmplitude, float highAmplitude) {
     HidVibrationDeviceHandle handles[2];
     const HidNpadIdType primaryNpadId = GetNpadIdForGamepad(gamepad, portIndex);
-    const auto candidates = GetSwitchVibrationRoutingCandidates(gamepad);
+    const auto candidates = GetSwitchVibrationRoutingCandidates(gamepad, portIndex);
+    const char* controllerName = SDL_GameControllerName(gamepad);
+    const int32_t playerIndex = SDL_GameControllerGetPlayerIndex(gamepad);
+    const uint32_t primaryStyleSet = hidGetNpadStyleSet(primaryNpadId);
+    const uint32_t handheldStyleSet = hidGetNpadStyleSet(HidNpadIdType_Handheld);
+
+    SPDLOG_INFO(
+        "Switch rumble begin: port={} name='{}' playerIndex={} primaryNpadId={} primaryStyleSet=0x{:X} handheldStyleSet=0x{:X} lowAmp={:.3f} highAmp={:.3f}",
+        static_cast<uint32_t>(portIndex), (controllerName != nullptr) ? controllerName : "(unknown)", playerIndex,
+        static_cast<uint32_t>(primaryNpadId), primaryStyleSet, handheldStyleSet, lowAmplitude, highAmplitude);
 
     for (size_t i = 0; i < candidates.count; i++) {
         const SwitchVibrationRouting& routing = candidates.routings[i];
         HidNpadIdType npadCandidates[2] = { primaryNpadId, primaryNpadId };
         size_t npadCandidateCount = 1;
         if (routing.styleTag == HidNpadStyleTag_NpadHandheld && primaryNpadId != HidNpadIdType_Handheld) {
-            // In attached handheld mode, vibration can report success on No1..No8
-            // without physically driving motors. Try Handheld npad first.
-            npadCandidates[0] = HidNpadIdType_Handheld;
-            npadCandidates[1] = primaryNpadId;
-            npadCandidateCount = 2;
+            // Port 0 can legitimately map to handheld motors when Joy-Cons are attached.
+            // For non-P1 ports, prefer the player's own npad to avoid routing detached
+            // multiplayer rumble to Handheld and starving P2+ vibration.
+            if (portIndex == 0) {
+                npadCandidates[0] = HidNpadIdType_Handheld;
+                npadCandidates[1] = primaryNpadId;
+                npadCandidateCount = 2;
+            } else {
+                npadCandidates[0] = primaryNpadId;
+                npadCandidateCount = 1;
+            }
         }
 
         for (size_t npadAttempt = 0; npadAttempt < npadCandidateCount; npadAttempt++) {
             const HidNpadIdType npadId = npadCandidates[npadAttempt];
+            const uint32_t targetStyleSet = (npadId == HidNpadIdType_Handheld) ? handheldStyleSet : primaryStyleSet;
+
+            if ((targetStyleSet & static_cast<uint32_t>(routing.styleTag)) == 0) {
+                SPDLOG_INFO(
+                    "Switch rumble skip style: port={} npadId={} style={} targetStyleSet=0x{:X}",
+                    static_cast<uint32_t>(portIndex), static_cast<uint32_t>(npadId),
+                    static_cast<uint32_t>(routing.styleTag), targetStyleSet);
+                continue;
+            }
+
             Result rc = hidInitializeVibrationDevices(handles, routing.handleCount, npadId, routing.styleTag);
             if (R_FAILED(rc)) {
+                SPDLOG_WARN(
+                    "Switch rumble init failed: port={} npadId={} style={} handles={} rc=0x{:08X}",
+                    static_cast<uint32_t>(portIndex), static_cast<uint32_t>(npadId),
+                    static_cast<uint32_t>(routing.styleTag), static_cast<uint32_t>(routing.handleCount),
+                    static_cast<uint32_t>(rc));
                 continue;
             }
 
@@ -144,12 +186,26 @@ bool SendSwitchHidVibration(SDL_GameController* gamepad, uint8_t portIndex, floa
 
             rc = hidSendVibrationValues(handles, values, routing.handleCount);
             if (R_FAILED(rc)) {
+                SPDLOG_WARN(
+                    "Switch rumble send failed: port={} npadId={} style={} handles={} rc=0x{:08X} lowAmp={:.3f} highAmp={:.3f}",
+                    static_cast<uint32_t>(portIndex), static_cast<uint32_t>(npadId),
+                    static_cast<uint32_t>(routing.styleTag), static_cast<uint32_t>(routing.handleCount),
+                    static_cast<uint32_t>(rc), lowAmplitude, highAmplitude);
                 continue;
             }
+
+            SPDLOG_INFO(
+                "Switch rumble sent: port={} npadId={} style={} handles={} lowAmp={:.3f} highAmp={:.3f}",
+                static_cast<uint32_t>(portIndex), static_cast<uint32_t>(npadId),
+                static_cast<uint32_t>(routing.styleTag), static_cast<uint32_t>(routing.handleCount), lowAmplitude,
+                highAmplitude);
 
             return true;
         }
     }
+
+    SPDLOG_WARN("Switch rumble fallback to SDL: port={} name='{}'", static_cast<uint32_t>(portIndex),
+                (controllerName != nullptr) ? controllerName : "(unknown)");
 
     return false;
 }
@@ -167,7 +223,16 @@ bool StopSwitchGamepadRumble(SDL_GameController* gamepad, uint8_t portIndex) {
 template <typename RumbleFunc>
 void ApplySwitchRumbleForPort(uint8_t portIndex, RumbleFunc&& applyRumble) {
     auto* manager = Ship::Context::GetInstance()->GetControlDeck()->GetConnectedPhysicalDeviceManager().get();
-    for (const auto& [instanceId, gamepad] : manager->GetConnectedSDLGamepadsForPort(portIndex)) {
+    const auto& gamepads = manager->GetConnectedSDLGamepadsForPort(portIndex);
+
+    SPDLOG_INFO("Switch rumble apply: port={} mappedGamepads={}", static_cast<uint32_t>(portIndex), gamepads.size());
+
+    for (const auto& [instanceId, gamepad] : gamepads) {
+        const char* controllerName = SDL_GameControllerName(gamepad);
+        const int32_t playerIndex = SDL_GameControllerGetPlayerIndex(gamepad);
+        SPDLOG_INFO("Switch rumble gamepad: port={} instanceId={} name='{}' playerIndex={}",
+                    static_cast<uint32_t>(portIndex), static_cast<int32_t>(instanceId),
+                    (controllerName != nullptr) ? controllerName : "(unknown)", playerIndex);
         applyRumble(gamepad);
     }
 }

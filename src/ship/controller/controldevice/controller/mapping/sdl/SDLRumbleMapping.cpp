@@ -42,6 +42,9 @@ void StopGamepadRumble(SDL_GameController* gamepad) {
 }
 
 #if defined(__SWITCH__)
+constexpr uint16_t kNintendoVendorId = 0x057E;
+constexpr uint16_t kSwitchProProductId = 0x2009;
+
 HidNpadIdType GetNpadIdForGamepad(SDL_GameController* gamepad, uint8_t portIndex) {
     const int32_t playerIndex = SDL_GameControllerGetPlayerIndex(gamepad);
     if (playerIndex >= 0 && playerIndex <= 7) {
@@ -76,6 +79,39 @@ SwitchVibrationRoutingCandidates MakeRoutingCandidates(const SwitchVibrationRout
     return candidates;
 }
 
+bool IsLikelySwitchProController(SDL_GameController* gamepad) {
+    if (SDL_GameControllerGetType(gamepad) == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO) {
+        return true;
+    }
+
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(gamepad);
+    if (joystick != nullptr) {
+        const uint16_t vendor = SDL_JoystickGetVendor(joystick);
+        const uint16_t product = SDL_JoystickGetProduct(joystick);
+        if (vendor == kNintendoVendorId && product == kSwitchProProductId) {
+            return true;
+        }
+    }
+
+    const char* name = SDL_GameControllerName(gamepad);
+    return name != nullptr && SDL_strstr(name, "Pro Controller") != nullptr;
+}
+
+const char* GetSwitchControllerTypeName(SDL_GameController* gamepad) {
+    switch (SDL_GameControllerGetType(gamepad)) {
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+        return "SwitchPro";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+        return "JoyConLeft";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+        return "JoyConRight";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+        return "JoyConPair";
+    default:
+        return "Other";
+    }
+}
+
 SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameController* gamepad, uint8_t portIndex) {
     SwitchVibrationRoutingCandidates candidates =
         MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadHandheld, 2 },
@@ -94,6 +130,23 @@ SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameCon
                                            { HidNpadStyleTag_NpadFullKey, 2 });
         return candidates;
     }
+    if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO) {
+        candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadFullKey, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
+                                           { HidNpadStyleTag_NpadHandheld, 2 });
+        return candidates;
+    }
+    if (type == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) {
+        if (portIndex == 0) {
+            // Keep handheld-first for P1 attached mode compatibility.
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
+                                               { HidNpadStyleTag_NpadFullKey, 2 });
+        } else {
+            // Detached multiplayer should target JoyDual first so both Joy-Con motors run.
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadHandheld, 2 },
+                                               { HidNpadStyleTag_NpadFullKey, 2 });
+        }
+        return candidates;
+    }
 
     const char* name = SDL_GameControllerName(gamepad);
     if (name != nullptr && SDL_strstr(name, "Combined Joy-Cons") != nullptr) {
@@ -107,14 +160,15 @@ SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameCon
                                                { HidNpadStyleTag_NpadFullKey, 2 });
         }
     } else if (name != nullptr && SDL_strstr(name, "Switch Controller") != nullptr) {
+        // SDL type detection is incomplete on Switch. Route based on what motors are
+        // actually available. Default to handheld-first on port 0 for backward compat
+        // with attached Joy-Cons, but the runtime styleSet check will redirect Pro to FullKey.
         if (portIndex == 0) {
-            // Keep handheld-first for P1 attached mode compatibility.
-            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadJoyDual, 2 },
-                                               { HidNpadStyleTag_NpadFullKey, 2 });
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadHandheld, 2 }, { HidNpadStyleTag_NpadFullKey, 2 },
+                                               { HidNpadStyleTag_NpadJoyDual, 2 });
         } else {
-            // Detached multiplayer should target JoyDual first so both Joy-Con motors run.
-            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadHandheld, 2 },
-                                               { HidNpadStyleTag_NpadFullKey, 2 });
+            candidates = MakeRoutingCandidates({ HidNpadStyleTag_NpadJoyDual, 2 }, { HidNpadStyleTag_NpadFullKey, 2 },
+                                               { HidNpadStyleTag_NpadHandheld, 2 });
         }
     }
 
@@ -124,16 +178,41 @@ SwitchVibrationRoutingCandidates GetSwitchVibrationRoutingCandidates(SDL_GameCon
 bool SendSwitchHidVibration(SDL_GameController* gamepad, uint8_t portIndex, float lowAmplitude, float highAmplitude) {
     HidVibrationDeviceHandle handles[2];
     const HidNpadIdType primaryNpadId = GetNpadIdForGamepad(gamepad, portIndex);
-    const auto candidates = GetSwitchVibrationRoutingCandidates(gamepad, portIndex);
     const char* controllerName = SDL_GameControllerName(gamepad);
     const int32_t playerIndex = SDL_GameControllerGetPlayerIndex(gamepad);
+    const auto controllerType = SDL_GameControllerGetType(gamepad);
+    const auto* controllerTypeName = GetSwitchControllerTypeName(gamepad);
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(gamepad);
+    const uint16_t vendor = (joystick != nullptr) ? SDL_JoystickGetVendor(joystick) : 0;
+    const uint16_t product = (joystick != nullptr) ? SDL_JoystickGetProduct(joystick) : 0;
     const uint32_t primaryStyleSet = hidGetNpadStyleSet(primaryNpadId);
     const uint32_t handheldStyleSet = hidGetNpadStyleSet(HidNpadIdType_Handheld);
 
+    // On Switch, SDL type detection is incomplete. Runtime check: if the primary npad
+    // doesn't have handheld motors but does have FullKey/JoyDual, and we're on port 0,
+    // skip handheld-first fallback and go straight to what the controller has.
+    auto candidates = GetSwitchVibrationRoutingCandidates(gamepad, portIndex);
+    if (portIndex == 0 && primaryNpadId != HidNpadIdType_Handheld) {
+        const bool primaryHasHandheld = (primaryStyleSet & static_cast<uint32_t>(HidNpadStyleTag_NpadHandheld)) != 0;
+        const bool primaryHasFullKey = (primaryStyleSet & static_cast<uint32_t>(HidNpadStyleTag_NpadFullKey)) != 0;
+        const bool primaryHasJoyDual = (primaryStyleSet & static_cast<uint32_t>(HidNpadStyleTag_NpadJoyDual)) != 0;
+
+        if (!primaryHasHandheld && (primaryHasFullKey || primaryHasJoyDual)) {
+            // Primary npad has controller-local motors but not handheld dock motors.
+            // Swap handheld to be last priority, not first.
+            if (candidates.routings[0].styleTag == HidNpadStyleTag_NpadHandheld) {
+                SwitchVibrationRouting tmp = candidates.routings[0];
+                candidates.routings[0] = candidates.routings[1];
+                candidates.routings[1] = tmp;
+            }
+        }
+    }
+
     SPDLOG_INFO(
-        "Switch rumble begin: port={} name='{}' playerIndex={} primaryNpadId={} primaryStyleSet=0x{:X} handheldStyleSet=0x{:X} lowAmp={:.3f} highAmp={:.3f}",
-        static_cast<uint32_t>(portIndex), (controllerName != nullptr) ? controllerName : "(unknown)", playerIndex,
-        static_cast<uint32_t>(primaryNpadId), primaryStyleSet, handheldStyleSet, lowAmplitude, highAmplitude);
+        "Switch rumble begin: port={} name='{}' type={} playerIndex={} vid=0x{:04X} pid=0x{:04X} primaryNpadId={} primaryStyleSet=0x{:X} handheldStyleSet=0x{:X} lowAmp={:.3f} highAmp={:.3f}",
+        static_cast<uint32_t>(portIndex), (controllerName != nullptr) ? controllerName : "(unknown)",
+        controllerTypeName, playerIndex, vendor, product, static_cast<uint32_t>(primaryNpadId), primaryStyleSet,
+        handheldStyleSet, lowAmplitude, highAmplitude);
 
     for (size_t i = 0; i < candidates.count; i++) {
         const SwitchVibrationRouting& routing = candidates.routings[i];

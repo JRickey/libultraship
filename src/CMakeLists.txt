@@ -10,6 +10,10 @@ set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 option(USE_OPENGLES "Enable GLES3" OFF)
 option(GFX_DEBUG_DISASSEMBLER "Enable libgfxd" OFF)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    set(USE_OPENGLES ON CACHE BOOL "" FORCE)
+endif()
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 use_props(${PROJECT_NAME} "${CMAKE_CONFIGURATION_TYPES}" "${DEFAULT_CXX_PROPS}")
 endif()
@@ -65,19 +69,58 @@ if (GFX_DEBUG_DISASSEMBLER)
 endif()
 
 find_package(libzip REQUIRED)
-target_link_libraries(libultraship PRIVATE libzip::zip)
+target_link_libraries(libultraship PUBLIC libzip::zip)
 
-find_package(nlohmann_json REQUIRED)
+find_package(nlohmann_json QUIET)
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    if (NOT TARGET nlohmann_json)
+        include(FetchContent)
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        FetchContent_Declare(
+            nlohmann_json
+            GIT_REPOSITORY https://github.com/nlohmann/json.git
+            GIT_TAG v3.12.0
+            OVERRIDE_FIND_PACKAGE
+        )
+        FetchContent_MakeAvailable(nlohmann_json)
+    endif()
+
+    if (NOT TARGET nlohmann_json::nlohmann_json AND TARGET nlohmann_json)
+        add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+    endif()
+endif()
+
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    message(FATAL_ERROR "nlohmann_json target missing after package/fetch resolution")
+endif()
 target_link_libraries(libultraship PUBLIC nlohmann_json::nlohmann_json)
 
 find_package(tinyxml2 REQUIRED)
 target_link_libraries(libultraship PUBLIC tinyxml2::tinyxml2)
 
-find_package(spdlog REQUIRED)
+find_package(spdlog QUIET)
+if (NOT TARGET spdlog::spdlog)
+    include(FetchContent)
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+    set(SPDLOG_FWRITE_UNLOCKED OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.16.0
+        OVERRIDE_FIND_PACKAGE
+    )
+    FetchContent_MakeAvailable(spdlog)
+endif()
+
+if (NOT TARGET spdlog::spdlog)
+    message(FATAL_ERROR "spdlog target missing after package/fetch resolution")
+endif()
 target_link_libraries(libultraship PUBLIC spdlog::spdlog)
 
 # hidapi for native Raphnet N64 USB adapter (vendored via FetchContent in cmake/dependencies/common.cmake).
-target_link_libraries(libultraship PRIVATE hidapi::hidapi)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    target_link_libraries(libultraship PRIVATE hidapi::hidapi)
+endif()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(THREADS_PREFER_PTHREAD_FLAG ON)

@@ -32,6 +32,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     include(cmake/dependencies/windows-vcpkg.cmake)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    include(cmake/dependencies/switch.cmake)
+endif()
+
 include(cmake/dependencies/common.cmake)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
@@ -53,6 +57,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
     include(cmake/dependencies/openbsd.cmake)
 endif()
+
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     include(cmake/dependencies/windows.cmake)

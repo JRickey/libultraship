@@ -1120,11 +1120,13 @@ void GfxRenderingAPIOGL::SetColorWriteMask(bool enable) {
     // beyond the authored mask region — SSB64's intro explosion Overlay
     // punches its reveal mask over the red outer ring that way. The RSP
     // clips these tris; matching that requires clipping here too.
+#ifndef USE_OPENGLES // GLES does not expose GL_DEPTH_CLAMP.
     if (enable) {
         glEnable(GL_DEPTH_CLAMP);
     } else {
         glDisable(GL_DEPTH_CLAMP);
     }
+#endif
 }
 
 void GfxRenderingAPIOGL::ClearRegionImpl(float x0, float y0, float x1, float y1, bool color, bool depth,
@@ -1154,10 +1156,18 @@ void GfxRenderingAPIOGL::ClearRegionImpl(float x0, float y0, float x1, float y1,
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     }
     glDepthMask(GL_TRUE);
+#ifdef USE_OPENGLES
+    glClearDepthf(depth_value);
+#else
     glClearDepth((GLdouble)depth_value);
+#endif
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear((color ? GL_COLOR_BUFFER_BIT : 0) | (depth ? GL_DEPTH_BUFFER_BIT : 0));
+#ifdef USE_OPENGLES
+    glClearDepthf(1.0f);
+#else
     glClearDepth(1.0);
+#endif
     glDepthMask(mCurrentDepthMask ? GL_TRUE : GL_FALSE);
     if (color && !mColorWriteEnabled) {
         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);

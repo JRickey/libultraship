@@ -18,6 +18,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -330,6 +331,58 @@ bool gfxPointerInLoadedModule(const void* ptr) {
     }
     return info.dli_fbase != sMainBase;
 #endif
+}
+
+// Trusted low-VA static data ranges. The SETTIMG/G_VTX low-VA guards must
+// reject stale N64-segment leftovers (0x01000000, 0x0E000000, ...) that
+// numerically overlap the main image of a non-PIE build — which is exactly
+// why gfxPointerInLoadedModule excludes the main image. But that exclusion
+// also swallows LEGITIMATE baked `.rodata` assets compiled into the main
+// binary (e.g. the port's CSS scroll-arrow RGBA16 arrays): in a non-PIE
+// build they sit at ~0x01xxxxxx, the guard drops their SETTIMG, and the
+// sprite renders whatever texture was previously bound. (PIE builds load
+// high and never trip the guard, which is why official CI AppImages were
+// unaffected while local non-PIE builds showed a garbled arrow.)
+//
+// Code that owns such an asset registers its exact range up front; the
+// guards then accept only those bytes while still rejecting every other
+// low-VA value. Registration is append-only and tiny (a handful of static
+// assets), so a linear scan under a mutex is plenty.
+namespace {
+struct TrustedLowVARange {
+    uintptr_t base;
+    size_t size;
+};
+static std::vector<TrustedLowVARange> sTrustedLowVARanges;
+static std::mutex sTrustedLowVARangesMutex;
+} // namespace
+
+extern "C" void gfxRegisterTrustedLowVARange(const void* base, size_t size) {
+    if (base == nullptr || size == 0) {
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(sTrustedLowVARangesMutex);
+    uintptr_t b = reinterpret_cast<uintptr_t>(base);
+    for (const TrustedLowVARange& r : sTrustedLowVARanges) {
+        if (r.base == b && r.size >= size) {
+            return; // idempotent re-registration
+        }
+    }
+    sTrustedLowVARanges.push_back({ b, size });
+}
+
+bool gfxPointerInTrustedLowVARange(const void* ptr) {
+    if (ptr == nullptr) {
+        return false;
+    }
+    const std::lock_guard<std::mutex> lock(sTrustedLowVARangesMutex);
+    uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
+    for (const TrustedLowVARange& r : sTrustedLowVARanges) {
+        if (p >= r.base && p < r.base + r.size) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool gfxPointerHasReadableBytes(const void* ptr, size_t size) {
@@ -5251,7 +5304,7 @@ static inline bool gfx_vtx_addr_is_unresolved(const void* addr) {
         return false;
     }
 #endif
-    return !gfxPointerInLoadedModule(addr);
+    return !gfxPointerInLoadedModule(addr) && !gfxPointerInTrustedLowVARange(addr);
 }
 
 // Almost all versions of the microcode have their own version of this opcode
@@ -5808,7 +5861,8 @@ bool gfx_set_timg_handler_rdp(F3DGfx** cmd0) {
     // real `.rodata` texture from a TCC mod whose DLL got loaded at a low
     // preferred base. Accepting those lets mods use static texture data
     // without a heap-copy workaround.
-    if (i <= 0x0FFFFFFF && !gfxPointerInLoadedModule(reinterpret_cast<const void*>(i))) {
+    if (i <= 0x0FFFFFFF && !gfxPointerInLoadedModule(reinterpret_cast<const void*>(i)) &&
+        !gfxPointerInTrustedLowVARange(reinterpret_cast<const void*>(i))) {
         return false;
     }
 

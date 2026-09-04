@@ -4,6 +4,8 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 #include <math.h>
@@ -429,9 +431,41 @@ bool gfxPointerHasReadableBytes(const void* ptr, size_t size) {
         remaining -= available;
         cursor += available;
     }
-#endif
 
     return true;
+#else
+    // POSIX: probe with mincore(2) — it fails with ENOMEM when any page in
+    // the range is unmapped. This branch used to be an unconditional
+    // `return true`, which made every readability guard a no-op on Linux:
+    // gfx_check_image_signature() then strncmp'd stale texture pointers and
+    // SIGSEGV'd inside OtrSignatureCheck whenever a dropped/stale SETTIMG
+    // address pointed at unmapped heap. (mincore cannot detect PROT_NONE
+    // mappings, but glibc does not place PROT_NONE at the brk frontier, and
+    // "mapped but unreadable" is far rarer than "unmapped".)
+    static const uintptr_t sPageSize = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+    uintptr_t start = reinterpret_cast<uintptr_t>(ptr) & ~(sPageSize - 1);
+    uintptr_t end = reinterpret_cast<uintptr_t>(ptr) + size;
+    size_t numPages = (end - start + sPageSize - 1) / sPageSize;
+
+    // The probe covers at most a handful of pages for every caller today
+    // (signature checks probe 8 bytes); cap defensively anyway.
+    // (mincore's vector is unsigned char* on Linux but char* on macOS.)
+#ifdef __APPLE__
+    using MincoreVec = char;
+#else
+    using MincoreVec = unsigned char;
+#endif
+    MincoreVec vec[16];
+    while (numPages != 0) {
+        size_t chunk = numPages < sizeof(vec) ? numPages : sizeof(vec);
+        if (mincore(reinterpret_cast<void*>(start), chunk * sPageSize, vec) != 0) {
+            return false;
+        }
+        start += chunk * sPageSize;
+        numPages -= chunk;
+    }
+    return true;
+#endif
 }
 
 } // namespace

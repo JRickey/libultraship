@@ -13,5 +13,11 @@ elseif ("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "arm64")
 endif()
 
 	vcpkg_bootstrap()
-	vcpkg_install_packages(zlib bzip2 "sdl2[vulkan]" glew libzip nlohmann-json tinyxml2 spdlog)    
+	if(PAPERBOAT_UWP)
+		# SDL2 is supplied by uwp-dep. Mixing its import library with vcpkg's
+		# desktop SDL produces duplicate symbols and the wrong Win32 backend.
+		vcpkg_install_packages(zlib bzip2 glew libzip nlohmann-json tinyxml2 spdlog)
+	else()
+		vcpkg_install_packages(zlib bzip2 "sdl2[vulkan]" glew libzip nlohmann-json tinyxml2 spdlog)
+	endif()
 endif()

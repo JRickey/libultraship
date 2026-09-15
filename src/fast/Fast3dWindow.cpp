@@ -15,6 +15,10 @@
 
 #include <fstream>
 
+#ifdef _UWP
+extern "C" __declspec(dllimport) void uwp_GetScreenSize(int* width, int* height);
+#endif
+
 namespace Fast {
 
 extern void GfxSetInstance(std::shared_ptr<Interpreter> gfx);
@@ -88,8 +92,16 @@ void Fast3dWindow::Init() {
         width = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Fullscreen.Width", gameMode ? 1280 : 1920);
         height = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Fullscreen.Height", gameMode ? 800 : 1080);
     } else {
+#ifdef _UWP
+        int screenWidth = 1920;
+        int screenHeight = 1080;
+        uwp_GetScreenSize(&screenWidth, &screenHeight);
+        width = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Width", screenWidth);
+        height = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Height", screenHeight);
+#else
         width = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Width", 640);
         height = Ship::Context::GetInstance()->GetConfig()->GetInt("Window.Height", 480);
+#endif
     }
     Ship::Context::GetInstance()->GetWindow()->SetFullscreenScancode(
         Ship::Context::GetInstance()->GetConfig()->GetInt("Shortcuts.Fullscreen", Ship::KbScancode::LUS_KB_F11));

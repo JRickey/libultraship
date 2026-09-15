@@ -141,6 +141,10 @@ endif()
 
 target_compile_definitions(libultraship PRIVATE ${GBI_UCODE})
 
+if(BATTLESHIP_UWP)
+    target_compile_definitions(libultraship PUBLIC _UWP=1 BATTLESHIP_UWP=1)
+endif()
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         WIN32
@@ -256,4 +260,3 @@ if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU|Clang")
     )
     endif()
 endif()
-

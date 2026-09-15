@@ -5,6 +5,13 @@ find_package(OpenGL QUIET)
 #=================== ImGui ===================
 set(imgui_fixes_and_config_patch_file ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/patches/imgui-fixes-and-config.patch)
 set(imgui_apply_patch_command ${CMAKE_COMMAND} -Dpatch_file=${imgui_fixes_and_config_patch_file} -Dwith_reset=TRUE -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/git-patch.cmake)
+if(BATTLESHIP_UWP)
+    set(imgui_uwp_patch_file ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/patches/imgui-uwp.patch)
+    set(imgui_apply_patch_command
+        ${imgui_apply_patch_command}
+        COMMAND ${CMAKE_COMMAND} -Dpatch_file=${imgui_uwp_patch_file} -Dwith_reset=FALSE
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/git-patch.cmake)
+endif()
 
 FetchContent_Declare(
     ImGui

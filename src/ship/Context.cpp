@@ -166,6 +166,16 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
 #endif
 
         auto logPath = GetPathRelativeToAppDirectory(("logs/" + GetName() + ".log"));
+        // A fresh per-user app-data directory (notably UWP LocalState) does
+        // not contain the logs subdirectory. spdlog's rotating sink creates
+        // the file, but not its parent, so initialization otherwise fails on
+        // the application's first launch.
+        std::error_code logDirectoryError;
+        std::filesystem::create_directories(std::filesystem::path(logPath).parent_path(), logDirectoryError);
+        if (logDirectoryError) {
+            std::cout << "Log directory creation failed: " << logDirectoryError.message() << std::endl;
+            return false;
+        }
         auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logPath, 1024 * 1024 * 10, 10);
         sinks.push_back(fileSink);
 #ifdef _DEBUG

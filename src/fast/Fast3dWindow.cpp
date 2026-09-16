@@ -13,107 +13,13 @@
 #include "fast/backends/gfx_direct3d11.h"
 #include "fast/backends/gfx_window_manager_api.h"
 
-#include <algorithm>
-#include <chrono>
-#include <cstdlib>
 #include <fstream>
-#include <vector>
 
 #ifdef _UWP
 extern "C" __declspec(dllimport) void uwp_GetScreenSize(int* width, int* height);
 #endif
 
 namespace Fast {
-
-namespace {
-
-struct Fast3dPerfTrace {
-    bool initialized = false;
-    bool enabled = false;
-    std::chrono::steady_clock::time_point windowStart;
-    int calls = 0;
-    int rejected = 0;
-    std::vector<double> readyMs;
-    std::vector<double> guiBeginMs;
-    std::vector<double> startFrameMs;
-    std::vector<double> runMs;
-    std::vector<double> guiEndMs;
-    std::vector<double> endFrameMs;
-    std::vector<double> totalMs;
-};
-
-Fast3dPerfTrace sFast3dPerf;
-
-double PerfAverage(const std::vector<double>& values) {
-    if (values.empty()) {
-        return 0.0;
-    }
-    double sum = 0.0;
-    for (double value : values) {
-        sum += value;
-    }
-    return sum / static_cast<double>(values.size());
-}
-
-double PerfP95(const std::vector<double>& values) {
-    if (values.empty()) {
-        return 0.0;
-    }
-    std::vector<double> sorted(values);
-    std::sort(sorted.begin(), sorted.end());
-    const double index = 0.95 * static_cast<double>(sorted.size() - 1);
-    const size_t low = static_cast<size_t>(index);
-    const size_t high = std::min(low + 1, sorted.size() - 1);
-    const double weight = index - static_cast<double>(low);
-    return sorted[low] * (1.0 - weight) + sorted[high] * weight;
-}
-
-void PerfInit() {
-    if (sFast3dPerf.initialized) {
-        return;
-    }
-    sFast3dPerf.initialized = true;
-#ifdef _UWP
-    sFast3dPerf.enabled = true;
-#else
-    sFast3dPerf.enabled = std::getenv("SSB64_PERF_TRACE") != nullptr;
-#endif
-    sFast3dPerf.windowStart = std::chrono::steady_clock::now();
-}
-
-void PerfMaybeLog(std::chrono::steady_clock::time_point now) {
-    if (!sFast3dPerf.enabled ||
-        std::chrono::duration<double>(now - sFast3dPerf.windowStart).count() < 1.0) {
-        return;
-    }
-    SPDLOG_WARN(
-        "[perf-fast3d] calls={} rejected={} ready_ms={:.3f}/{:.3f} gui_begin_ms={:.3f}/{:.3f} "
-        "start_ms={:.3f}/{:.3f} run_ms={:.3f}/{:.3f} gui_end_ms={:.3f}/{:.3f} "
-        "end_ms={:.3f}/{:.3f} total_ms={:.3f}/{:.3f}",
-        sFast3dPerf.calls, sFast3dPerf.rejected, PerfAverage(sFast3dPerf.readyMs), PerfP95(sFast3dPerf.readyMs),
-        PerfAverage(sFast3dPerf.guiBeginMs), PerfP95(sFast3dPerf.guiBeginMs),
-        PerfAverage(sFast3dPerf.startFrameMs), PerfP95(sFast3dPerf.startFrameMs),
-        PerfAverage(sFast3dPerf.runMs), PerfP95(sFast3dPerf.runMs),
-        PerfAverage(sFast3dPerf.guiEndMs), PerfP95(sFast3dPerf.guiEndMs),
-        PerfAverage(sFast3dPerf.endFrameMs), PerfP95(sFast3dPerf.endFrameMs),
-        PerfAverage(sFast3dPerf.totalMs), PerfP95(sFast3dPerf.totalMs));
-    sFast3dPerf.windowStart = now;
-    sFast3dPerf.calls = 0;
-    sFast3dPerf.rejected = 0;
-    sFast3dPerf.readyMs.clear();
-    sFast3dPerf.guiBeginMs.clear();
-    sFast3dPerf.startFrameMs.clear();
-    sFast3dPerf.runMs.clear();
-    sFast3dPerf.guiEndMs.clear();
-    sFast3dPerf.endFrameMs.clear();
-    sFast3dPerf.totalMs.clear();
-}
-
-double PerfMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end) {
-    return std::chrono::duration<double, std::milli>(end - begin).count();
-}
-
-} // namespace
 
 extern void GfxSetInstance(std::shared_ptr<Interpreter> gfx);
 
@@ -301,47 +207,18 @@ bool Fast3dWindow::IsFrameReady() {
 bool Fast3dWindow::DrawAndRunGraphicsCommands(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtxReplacements) {
     std::shared_ptr<Window> wnd = Ship::Context::GetInstance()->GetWindow();
 
-    PerfInit();
-    const auto totalBegin = std::chrono::steady_clock::now();
-
     // Skip dropped frames
-    const bool frameReady = wnd->IsFrameReady();
-    const auto readyEnd = std::chrono::steady_clock::now();
-    if (sFast3dPerf.enabled) {
-        sFast3dPerf.calls++;
-        sFast3dPerf.readyMs.push_back(PerfMs(totalBegin, readyEnd));
-    }
-    if (!frameReady) {
-        if (sFast3dPerf.enabled) {
-            sFast3dPerf.rejected++;
-            sFast3dPerf.totalMs.push_back(PerfMs(totalBegin, readyEnd));
-            PerfMaybeLog(readyEnd);
-        }
+    if (!wnd->IsFrameReady()) {
         return false;
     }
 
     auto gui = wnd->GetGui();
     wnd->GetMouseStateManager()->StartFrame();
     gui->StartDraw();
-    const auto guiBeginEnd = std::chrono::steady_clock::now();
     mInterpreter->StartFrame();
-    const auto startFrameEnd = std::chrono::steady_clock::now();
     mInterpreter->Run(commands, mtxReplacements);
-    const auto runEnd = std::chrono::steady_clock::now();
     gui->EndDraw();
-    const auto guiEnd = std::chrono::steady_clock::now();
     mInterpreter->EndFrame();
-    const auto totalEnd = std::chrono::steady_clock::now();
-
-    if (sFast3dPerf.enabled) {
-        sFast3dPerf.guiBeginMs.push_back(PerfMs(readyEnd, guiBeginEnd));
-        sFast3dPerf.startFrameMs.push_back(PerfMs(guiBeginEnd, startFrameEnd));
-        sFast3dPerf.runMs.push_back(PerfMs(startFrameEnd, runEnd));
-        sFast3dPerf.guiEndMs.push_back(PerfMs(runEnd, guiEnd));
-        sFast3dPerf.endFrameMs.push_back(PerfMs(guiEnd, totalEnd));
-        sFast3dPerf.totalMs.push_back(PerfMs(totalBegin, totalEnd));
-        PerfMaybeLog(totalEnd);
-    }
 
     return true;
 }

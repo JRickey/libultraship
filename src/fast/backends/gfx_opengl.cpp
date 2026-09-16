@@ -244,7 +244,7 @@ std::optional<std::string> opengl_include_fs(const std::string& path) {
     return *inc;
 }
 
-std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
+std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features, const ShaderProgramKey& key) {
     prism::Processor processor;
     prism::ContextItems mContext = {
         { "VERTEX_SHADER", false },
@@ -269,7 +269,7 @@ std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
         { "FILTER_THREE_POINT", FILTER_THREE_POINT },
         { "FILTER_LINEAR", FILTER_LINEAR },
         { "FILTER_NONE", FILTER_NONE },
-        { "srgb_mode", mSrgbMode },
+        { "srgb_mode", key.srgbMode },
         { "SHADER_0", SHADER_0 },
         { "SHADER_INPUT_1", SHADER_INPUT_1 },
         { "SHADER_INPUT_2", SHADER_INPUT_2 },
@@ -285,7 +285,7 @@ std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
         { "SHADER_1", SHADER_1 },
         { "SHADER_COMBINED", SHADER_COMBINED },
         { "SHADER_NOISE", SHADER_NOISE },
-        { "o_three_point_filtering", mCurrentFilterMode == FILTER_THREE_POINT },
+        { "o_three_point_filtering", key.filteringMode == FILTER_THREE_POINT },
         { "append_formula", (InvokeFunc)append_formula },
 #ifdef __APPLE__
         { "GLSL_VERSION", "#version 410 core" },
@@ -406,10 +406,16 @@ static std::string BuildVsShader(const CCFeatures& cc_features) {
     return result;
 }
 
-ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+ShaderProgramKey GfxRenderingAPIOGL::MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const {
+    return { shaderId0, shaderId1, mCurrentFilterMode, mSrgbMode };
+}
+
+ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(const ShaderProgramKey& key) {
+    const uint64_t shader_id0 = key.shaderId0;
+    const uint64_t shader_id1 = key.shaderId1;
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
-    const auto fs_buf = BuildFsShader(cc_features);
+    const auto fs_buf = BuildFsShader(cc_features, key);
     const auto vs_buf = BuildVsShader(cc_features);
     const GLchar* sources[2] = { vs_buf.data(), fs_buf.data() };
     const GLint lengths[2] = { (GLint)vs_buf.size(), (GLint)fs_buf.size() };
@@ -422,11 +428,12 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
     if (!success) {
         GLint max_length = 0;
         glGetShaderiv(vertex_shader, GL_INFO_LOG_LENGTH, &max_length);
-        char error_log[1024];
-        // fprintf(stderr, "Vertex shader compilation failed\n");
-        glGetShaderInfoLog(vertex_shader, max_length, &max_length, &error_log[0]);
-        // fprintf(stderr, "%s\n", &error_log[0]);
-        abort();
+        std::vector<GLchar> error_log(std::max(1, max_length));
+        glGetShaderInfoLog(vertex_shader, max_length, nullptr, error_log.data());
+        SPDLOG_ERROR("OpenGL vertex shader compile failed for shader_id0=0x{:016X} shader_id1=0x{:016X}: {}",
+                     shader_id0, shader_id1, error_log.data());
+        glDeleteShader(vertex_shader);
+        return nullptr;
     }
 
     GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
@@ -436,21 +443,41 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
     if (!success) {
         GLint max_length = 0;
         glGetShaderiv(fragment_shader, GL_INFO_LOG_LENGTH, &max_length);
-        char error_log[1024];
-        fprintf(stderr, "Fragment shader compilation failed\n");
-        glGetShaderInfoLog(fragment_shader, max_length, &max_length, &error_log[0]);
-        fprintf(stderr, "%s\n", &error_log[0]);
-        abort();
+        std::vector<GLchar> error_log(std::max(1, max_length));
+        glGetShaderInfoLog(fragment_shader, max_length, nullptr, error_log.data());
+        SPDLOG_ERROR("OpenGL fragment shader compile failed for shader_id0=0x{:016X} shader_id1=0x{:016X}: {}",
+                     shader_id0, shader_id1, error_log.data());
+        glDeleteShader(fragment_shader);
+        glDeleteShader(vertex_shader);
+        return nullptr;
     }
 
     GLuint shader_program = glCreateProgram();
     glAttachShader(shader_program, vertex_shader);
     glAttachShader(shader_program, fragment_shader);
     glLinkProgram(shader_program);
+    glGetProgramiv(shader_program, GL_LINK_STATUS, &success);
+    if (!success) {
+        GLint max_length = 0;
+        glGetProgramiv(shader_program, GL_INFO_LOG_LENGTH, &max_length);
+        std::vector<GLchar> error_log(std::max(1, max_length));
+        glGetProgramInfoLog(shader_program, max_length, nullptr, error_log.data());
+        SPDLOG_ERROR("OpenGL shader link failed for shader_id0=0x{:016X} shader_id1=0x{:016X}: {}", shader_id0,
+                     shader_id1, error_log.data());
+        glDeleteProgram(shader_program);
+        glDeleteShader(fragment_shader);
+        glDeleteShader(vertex_shader);
+        return nullptr;
+    }
+
+    glDetachShader(shader_program, vertex_shader);
+    glDetachShader(shader_program, fragment_shader);
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
 
     size_t cnt = 0;
 
-    struct ShaderProgram* prg = &mShaderProgramPool[std::make_pair(shader_id0, shader_id1)];
+    struct ShaderProgram* prg = &mShaderProgramPool[key];
     prg->attribLocations[cnt] = glGetAttribLocation(shader_program, "aVtxPos");
     prg->attribSizes[cnt] = 4;
     ++cnt;
@@ -541,8 +568,8 @@ ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, u
     return prg;
 }
 
-struct ShaderProgram* GfxRenderingAPIOGL::LookupShader(uint64_t shader_id0, uint64_t shader_id1) {
-    auto it = mShaderProgramPool.find(std::make_pair(shader_id0, shader_id1));
+struct ShaderProgram* GfxRenderingAPIOGL::LookupShader(const ShaderProgramKey& key) {
+    auto it = mShaderProgramPool.find(key);
     return it == mShaderProgramPool.end() ? nullptr : &it->second;
 }
 

@@ -43,18 +43,6 @@ namespace NS {
 class AutoreleasePool;
 }
 
-static size_t cantor(uint64_t a, uint64_t b) {
-    return (a + b) * (a + b + 1) / 2 + b;
-}
-
-struct hash_pair_shader_ids {
-    size_t operator()(const std::pair<uint64_t, uint32_t>& p) const {
-        auto value1 = p.first;
-        auto value2 = p.second;
-        return cantor(value1, value2);
-    }
-};
-
 namespace Fast {
 
 struct ShaderProgramMetal {
@@ -212,8 +200,9 @@ class GfxRenderingAPIMetal final : public GfxRenderingAPI {
     GfxClipParameters GetClipParameters() override;
     void UnloadShader(ShaderProgram* oldPrg) override;
     void LoadShader(ShaderProgram* newPrg) override;
-    ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) override;
-    ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) override;
+    ShaderProgramKey MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const override;
+    ShaderProgram* CreateAndLoadNewShader(const ShaderProgramKey& key) override;
+    ShaderProgram* LookupShader(const ShaderProgramKey& key) override;
     void ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) override;
     uint32_t NewTexture() override;
     void SelectTexture(int tile, uint32_t textureId) override;
@@ -285,8 +274,7 @@ class GfxRenderingAPIMetal final : public GfxRenderingAPI {
 
     int mCurrentVertexBufferPoolIndex = 0;
     MTL::Buffer* mVertexBufferPool[kMaxVertexBufferPoolSize];
-    std::unordered_map<std::pair<uint64_t, uint32_t>, struct ShaderProgramMetal, hash_pair_shader_ids>
-        mShaderProgramPool;
+    std::unordered_map<ShaderProgramKey, struct ShaderProgramMetal, ShaderProgramKey::Hasher> mShaderProgramPool;
 
     std::vector<struct TextureDataMetal> mTextures;
     std::vector<FramebufferMetal> mFramebuffers;

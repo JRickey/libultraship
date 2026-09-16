@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include <compare>
+#include <functional>
 #include <unordered_map>
 #include <set>
 #include "imconfig.h"
@@ -16,6 +18,32 @@ struct GfxClipParameters {
 };
 
 enum FilteringMode { FILTER_THREE_POINT, FILTER_LINEAR, FILTER_NONE };
+
+// Complete semantic identity for a generated Fast3D program. The combiner
+// IDs alone are not sufficient: filtering and output color space alter the
+// generated source (and, for Metal, the render-pipeline descriptor).
+//
+// Keeping this type in the shared rendering API gives every backend the same
+// cache contract and avoids the historical uint64_t -> uint32_t truncation of
+// shaderId1 in backend-local map keys.
+struct ShaderProgramKey {
+    uint64_t shaderId0 = 0;
+    uint64_t shaderId1 = 0;
+    FilteringMode filteringMode = FILTER_THREE_POINT;
+    bool srgbMode = false;
+
+    auto operator<=>(const ShaderProgramKey&) const = default;
+
+    struct Hasher {
+        size_t operator()(const ShaderProgramKey& key) const noexcept {
+            size_t hash = std::hash<uint64_t>{}(key.shaderId0);
+            hash ^= std::hash<uint64_t>{}(key.shaderId1) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<int>{}(static_cast<int>(key.filteringMode)) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+            hash ^= std::hash<bool>{}(key.srgbMode) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+            return hash;
+        }
+    };
+};
 
 // A hash function used to hash a: pair<float, float>
 struct hash_pair_ff {
@@ -36,8 +64,9 @@ class GfxRenderingAPI {
     virtual GfxClipParameters GetClipParameters() = 0;
     virtual void UnloadShader(ShaderProgram* oldPrg) = 0;
     virtual void LoadShader(ShaderProgram* newPrg) = 0;
-    virtual ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) = 0;
-    virtual ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) = 0;
+    virtual ShaderProgramKey MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const = 0;
+    virtual ShaderProgram* CreateAndLoadNewShader(const ShaderProgramKey& key) = 0;
+    virtual ShaderProgram* LookupShader(const ShaderProgramKey& key) = 0;
     virtual void ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) = 0;
     virtual uint32_t NewTexture() = 0;
     virtual void SelectTexture(int tile, uint32_t textureId) = 0;

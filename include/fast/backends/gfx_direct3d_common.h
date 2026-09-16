@@ -159,8 +159,9 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     GfxClipParameters GetClipParameters() override;
     void UnloadShader(struct ShaderProgram* oldPrg) override;
     void LoadShader(struct ShaderProgram* newPrg) override;
-    struct ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) override;
-    struct ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) override;
+    ShaderProgramKey MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const override;
+    struct ShaderProgram* CreateAndLoadNewShader(const ShaderProgramKey& key) override;
+    struct ShaderProgram* LookupShader(const ShaderProgramKey& key) override;
     void ShaderGetInfo(struct ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) override;
     uint32_t NewTexture() override;
     void SelectTexture(int tile, uint32_t textureId) override;
@@ -256,7 +257,7 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     PerFrameCB mPerFrameCbData;
     PerDrawCB mPerDrawCbData;
 
-    std::map<std::pair<uint64_t, uint32_t>, struct ShaderProgramD3D11> mShaderProgramPool;
+    std::map<ShaderProgramKey, struct ShaderProgramD3D11> mShaderProgramPool;
 
     std::vector<struct TextureData> mTextures;
     int mCurrentTile;

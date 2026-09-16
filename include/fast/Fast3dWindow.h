@@ -52,7 +52,7 @@ class Fast3dWindow : public Ship::Window {
     void SetTargetFps(int32_t fps);
     void SetMaximumFrameLatency(int32_t latency);
     ShaderPrewarmProgress PrewarmShaders(std::span<const ShaderPermutation> permutations, size_t startIndex = 0,
-                                         size_t maxNewPrograms = std::numeric_limits<size_t>::max());
+                                         size_t maxNewPrograms = (std::numeric_limits<size_t>::max)());
     void GetPixelDepthPrepare(float x, float y);
     uint16_t GetPixelDepth(float x, float y);
     void SetTextureFilter(FilteringMode filteringMode);

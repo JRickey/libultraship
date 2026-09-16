@@ -439,7 +439,7 @@ class Interpreter {
     void SetTargetFps(int fps);
     void SetMaxFrameLatency(int latency);
     ShaderPrewarmProgress PrewarmShaders(std::span<const ShaderPermutation> permutations, size_t startIndex = 0,
-                                         size_t maxNewPrograms = std::numeric_limits<size_t>::max());
+                                         size_t maxNewPrograms = (std::numeric_limits<size_t>::max)());
     void SetTextureFilter(FilteringMode mode);
     void EnableSrgbMode();
     int CreateFrameBuffer(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,

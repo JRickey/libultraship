@@ -144,8 +144,9 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     GfxClipParameters GetClipParameters() override;
     void UnloadShader(ShaderProgram* oldPrg) override;
     void LoadShader(ShaderProgram* newPrg) override;
-    ShaderProgram* CreateAndLoadNewShader(uint64_t shaderId0, uint64_t shaderId1) override;
-    ShaderProgram* LookupShader(uint64_t shaderId0, uint64_t shaderId1) override;
+    ShaderProgramKey MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const override;
+    ShaderProgram* CreateAndLoadNewShader(const ShaderProgramKey& key) override;
+    ShaderProgram* LookupShader(const ShaderProgramKey& key) override;
     void ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) override;
     uint32_t NewTexture() override;
     void SelectTexture(int tile, uint32_t textureId) override;
@@ -211,7 +212,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 
   private:
     void SetUniforms(ShaderProgram* prg) const;
-    std::string BuildFsShader(const CCFeatures& cc_features);
+    std::string BuildFsShader(const CCFeatures& cc_features, const ShaderProgramKey& key);
     void SetPerDrawUniforms();
     GLuint CompilePostProcessProgram(const std::string& fsSource, std::string& errOut);
     GLuint EnsurePostProcessVao();
@@ -226,7 +227,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     int8_t mLastScissorEnabled = -1;
     bool mColorWriteEnabled = true; // mirrors SetColorWriteMask (redirect-to-Z draws)
 
-    std::map<std::pair<uint64_t, uint32_t>, ShaderProgram> mShaderProgramPool;
+    std::map<ShaderProgramKey, ShaderProgram> mShaderProgramPool;
     ShaderProgram* mCurrentShaderProgram;
     ShaderProgram* mLastLoadedShader = nullptr;
 

@@ -119,6 +119,11 @@ void Fast3dWindow::SetMaximumFrameLatency(int32_t latency) {
     mInterpreter->SetMaxFrameLatency(latency);
 }
 
+ShaderPrewarmProgress Fast3dWindow::PrewarmShaders(std::span<const ShaderPermutation> permutations, size_t startIndex,
+                                                   size_t maxNewPrograms) {
+    return mInterpreter->PrewarmShaders(permutations, startIndex, maxNewPrograms);
+}
+
 void Fast3dWindow::GetPixelDepthPrepare(float x, float y) {
     mInterpreter->GetPixelDepthPrepare(x, y);
 }
@@ -156,11 +161,11 @@ void Fast3dWindow::InitWindowManager() {
 }
 
 void Fast3dWindow::SetTextureFilter(FilteringMode filteringMode) {
-    mInterpreter->GetCurrentRenderingAPI()->SetTextureFilter(filteringMode);
+    mInterpreter->SetTextureFilter(filteringMode);
 }
 
 void Fast3dWindow::EnableSRGBMode() {
-    mInterpreter->mRapi->SetSrgbMode();
+    mInterpreter->EnableSrgbMode();
 }
 
 void Fast3dWindow::SetRendererUCode(UcodeHandlers ucode) {

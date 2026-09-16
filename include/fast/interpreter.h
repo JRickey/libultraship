@@ -6,6 +6,9 @@
 #include <map>
 #include <list>
 #include <cstddef>
+#include <limits>
+#include <set>
+#include <span>
 #include <vector>
 #include <stack>
 #include <string>
@@ -133,7 +136,7 @@ class GfxWindowBackend;
 
 constexpr size_t MAX_SEGMENT_POINTERS = 16;
 constexpr size_t SHADER_ID_SHIFT = 16;
-constexpr int16_t ShaderIdUnmask(int id) {
+constexpr int16_t ShaderIdUnmask(uint64_t id) {
     return (id >> SHADER_ID_SHIFT) & 0xFFFF;
 }
 
@@ -366,6 +369,23 @@ struct GfxTextureCache {
     std::vector<uint32_t> free_texture_ids;
 };
 
+// Backend-neutral entry in a game-owned Fast3D warmup catalog. Custom shader
+// resource indices are intentionally not persisted here: those indices are
+// assigned per session. PrewarmShaders reports such entries as skipped.
+struct ShaderPermutation {
+    uint64_t shaderId0 = 0;
+    uint64_t shaderId1 = 0;
+};
+
+struct ShaderPrewarmProgress {
+    size_t nextIndex = 0;
+    size_t compiled = 0;
+    size_t alreadyCached = 0;
+    size_t failed = 0;
+    size_t skipped = 0;
+    bool complete = false;
+};
+
 struct ColorCombiner {
     uint64_t shader_id0;
     uint64_t shader_id1;
@@ -418,6 +438,10 @@ class Interpreter {
     int GetTargetFps();
     void SetTargetFps(int fps);
     void SetMaxFrameLatency(int latency);
+    ShaderPrewarmProgress PrewarmShaders(std::span<const ShaderPermutation> permutations, size_t startIndex = 0,
+                                         size_t maxNewPrograms = std::numeric_limits<size_t>::max());
+    void SetTextureFilter(FilteringMode mode);
+    void EnableSrgbMode();
     int CreateFrameBuffer(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height,
                           uint8_t resize);
     void SetFrameBuffer(int fb, float noiseScale);
@@ -495,6 +519,7 @@ class Interpreter {
     // a no-op when both CVars are unchanged from the prior frame.
     void UpdatePostProcessFromCVars();
     ShaderProgram* LookupOrCreateShaderProgram(uint64_t id0, uint64_t id1);
+    void InvalidateShaderBindings();
     ColorCombiner* LookupOrCreateColorCombiner(const ColorCombinerKey& key);
     void TextureCacheClear();
     bool TextureCacheLookup(int i, const TextureCacheKey& key);
@@ -589,6 +614,7 @@ class Interpreter {
     GfxTextureCache mTextureCache{};
     std::map<ColorCombinerKey, ColorCombiner> mColorCombinerPool; // color_combiner_pool;
     std::map<ColorCombinerKey, ColorCombiner>::iterator mPrevCombiner = mColorCombinerPool.end();
+    std::set<ShaderProgramKey> mFailedShaderKeys;
     uint8_t* mTexUploadBuffer = nullptr;
 
     GfxDimensions mGfxCurrentWindowDimensions{}; // gfx_current_window_dimensions;

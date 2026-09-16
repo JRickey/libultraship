@@ -388,7 +388,13 @@ void GfxRenderingAPIDX11::LoadShader(struct ShaderProgram* new_prg) {
     mShaderProgram = (struct ShaderProgramD3D11*)new_prg;
 }
 
-struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+ShaderProgramKey GfxRenderingAPIDX11::MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const {
+    return { shaderId0, shaderId1, mCurrentFilterMode, mSrgbMode };
+}
+
+struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(const ShaderProgramKey& key) {
+    const uint64_t shader_id0 = key.shaderId0;
+    const uint64_t shader_id1 = key.shaderId1;
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
 
@@ -396,7 +402,7 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
     size_t len, numFloats;
 
     auto shader = gfx_direct3d_common_build_shader(numFloats, cc_features, false,
-                                                   mCurrentFilterMode == FILTER_THREE_POINT, mSrgbMode);
+                                                   key.filteringMode == FILTER_THREE_POINT, key.srgbMode);
 
     buf = shader.data();
     len = shader.size();
@@ -436,12 +442,26 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
         return nullptr;
     }
 
-    struct ShaderProgramD3D11* prg = &mShaderProgramPool[std::make_pair(shader_id0, shader_id1)];
+    struct ShaderProgramD3D11* prg = &mShaderProgramPool[key];
 
-    ThrowIfFailed(mDevice->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr,
-                                              prg->vertex_shader.GetAddressOf()));
-    ThrowIfFailed(mDevice->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr,
-                                             prg->pixel_shader.GetAddressOf()));
+    auto failDeviceObject = [&](const char* object, HRESULT result) -> struct ShaderProgram* {
+        SPDLOG_ERROR("DX11 {} creation failed for shader_id0=0x{:016X} shader_id1=0x{:016X}: HRESULT 0x{:08X}",
+                     object, shader_id0, shader_id1, static_cast<uint32_t>(result));
+        mShaderProgramPool.erase(key);
+        return nullptr;
+    };
+
+    hr = mDevice->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr,
+                                     prg->vertex_shader.GetAddressOf());
+    if (FAILED(hr)) {
+        return failDeviceObject("vertex shader", hr);
+    }
+
+    hr = mDevice->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr,
+                                    prg->pixel_shader.GetAddressOf());
+    if (FAILED(hr)) {
+        return failDeviceObject("pixel shader", hr);
+    }
 
     // Input Layout
 
@@ -494,8 +514,11 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
         ied[ied_index++] = { "INPUT", i, format, 0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 };
     }
 
-    ThrowIfFailed(mDevice->CreateInputLayout(ied, ied_index, vs->GetBufferPointer(), vs->GetBufferSize(),
-                                             prg->input_layout.GetAddressOf()));
+    hr = mDevice->CreateInputLayout(ied, ied_index, vs->GetBufferPointer(), vs->GetBufferSize(),
+                                    prg->input_layout.GetAddressOf());
+    if (FAILED(hr)) {
+        return failDeviceObject("input layout", hr);
+    }
 
     // Blend state
 
@@ -517,7 +540,10 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
         blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     }
 
-    ThrowIfFailed(mDevice->CreateBlendState(&blend_desc, prg->blend_state.GetAddressOf()));
+    hr = mDevice->CreateBlendState(&blend_desc, prg->blend_state.GetAddressOf());
+    if (FAILED(hr)) {
+        return failDeviceObject("blend state", hr);
+    }
 
     // Save some values
 
@@ -535,8 +561,8 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
     return (struct ShaderProgram*)(mShaderProgram = prg);
 }
 
-struct ShaderProgram* GfxRenderingAPIDX11::LookupShader(uint64_t shader_id0, uint64_t shader_id1) {
-    auto it = mShaderProgramPool.find(std::make_pair(shader_id0, shader_id1));
+struct ShaderProgram* GfxRenderingAPIDX11::LookupShader(const ShaderProgramKey& key) {
+    auto it = mShaderProgramPool.find(key);
     return it == mShaderProgramPool.end() ? nullptr : (struct ShaderProgram*)&it->second;
 }
 

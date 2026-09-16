@@ -242,7 +242,13 @@ void GfxRenderingAPIMetal::LoadShader(struct ShaderProgram* new_prg) {
     mShaderProgram = (struct ShaderProgramMetal*)new_prg;
 }
 
-struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+ShaderProgramKey GfxRenderingAPIMetal::MakeShaderProgramKey(uint64_t shaderId0, uint64_t shaderId1) const {
+    return { shaderId0, shaderId1, mCurrentFilterMode, mSrgbMode };
+}
+
+struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(const ShaderProgramKey& key) {
+    const uint64_t shader_id0 = key.shaderId0;
+    const uint64_t shader_id1 = key.shaderId1;
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
 
@@ -251,26 +257,46 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
     NS::AutoreleasePool* autorelease_pool = NS::AutoreleasePool::alloc()->init();
 
     MTL::VertexDescriptor* vertex_descriptor =
-        gfx_metal_build_shader(buf, numFloats, cc_features, mCurrentFilterMode == FILTER_THREE_POINT);
+        gfx_metal_build_shader(buf, numFloats, cc_features, key.filteringMode == FILTER_THREE_POINT);
 
     NS::Error* error = nullptr;
     MTL::Library* library =
         mDevice->newLibrary(NS::String::string(buf.data(), NS::UTF8StringEncoding), nullptr, &error);
 
-    if (error != nullptr)
-        SPDLOG_ERROR("Failed to compile shader library, error {}",
-                     error->localizedDescription()->cString(NS::UTF8StringEncoding));
+    if (library == nullptr) {
+        const char* message = error != nullptr ? error->localizedDescription()->cString(NS::UTF8StringEncoding)
+                                               : "Metal returned no shader library or error";
+        SPDLOG_ERROR("Failed to compile shader library for shader_id0=0x{:016X} shader_id1=0x{:016X}: {}",
+                     shader_id0, shader_id1, message);
+        autorelease_pool->release();
+        return nullptr;
+    }
 
     MTL::RenderPipelineDescriptor* pipeline_descriptor = MTL::RenderPipelineDescriptor::alloc()->init();
     MTL::Function* vertexFunc = library->newFunction(NS::String::string("vertexShader", NS::UTF8StringEncoding));
     MTL::Function* fragmentFunc = library->newFunction(NS::String::string("fragmentShader", NS::UTF8StringEncoding));
 
+    if (vertexFunc == nullptr || fragmentFunc == nullptr) {
+        SPDLOG_ERROR("Failed to find generated Metal shader entry points for shader_id0=0x{:016X} shader_id1=0x{:016X}",
+                     shader_id0, shader_id1);
+        if (vertexFunc != nullptr) {
+            vertexFunc->release();
+        }
+        if (fragmentFunc != nullptr) {
+            fragmentFunc->release();
+        }
+        pipeline_descriptor->release();
+        library->release();
+        autorelease_pool->release();
+        return nullptr;
+    }
+
     pipeline_descriptor->setVertexFunction(vertexFunc);
     pipeline_descriptor->setFragmentFunction(fragmentFunc);
     pipeline_descriptor->setVertexDescriptor(vertex_descriptor);
 
-    pipeline_descriptor->colorAttachments()->object(0)->setPixelFormat(mSrgbMode ? MTL::PixelFormatBGRA8Unorm_sRGB
-                                                                                 : MTL::PixelFormatBGRA8Unorm);
+    pipeline_descriptor->colorAttachments()->object(0)->setPixelFormat(key.srgbMode ? MTL::PixelFormatBGRA8Unorm_sRGB
+                                                                                    : MTL::PixelFormatBGRA8Unorm);
     pipeline_descriptor->setDepthAttachmentPixelFormat(MTL::PixelFormatDepth32Float);
     if (cc_features.opt_alpha) {
         pipeline_descriptor->colorAttachments()->object(0)->setBlendingEnabled(true);
@@ -287,7 +313,7 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
         pipeline_descriptor->colorAttachments()->object(0)->setWriteMask(MTL::ColorWriteMaskAll);
     }
 
-    struct ShaderProgramMetal* prg = &mShaderProgramPool[std::make_pair(shader_id0, shader_id1)];
+    struct ShaderProgramMetal* prg = &mShaderProgramPool[key];
     prg->shader_id0 = shader_id0;
     prg->shader_id1 = shader_id1;
     prg->usedTextures[0] = cc_features.usedTextures[0];
@@ -299,24 +325,42 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
     prg->numInputs = cc_features.numInputs;
     prg->numFloats = numFloats;
 
-    // Prepoluate pipeline state cache with program and available msaa levels
+    bool createdPipelineState = false;
+
+    // Prepopulate pipeline state cache with program and available MSAA levels.
     for (int i = 0; i < ARRAY_COUNT(mMsaaNumQualityLevels); i++) {
         if (mMsaaNumQualityLevels[i] == 1) {
             int msaa_level = i + 1;
             pipeline_descriptor->setSampleCount(msaa_level);
+            error = nullptr;
             MTL::RenderPipelineState* pipeline_state = mDevice->newRenderPipelineState(pipeline_descriptor, &error);
 
-            if (!pipeline_state || error != nullptr) {
+            if (pipeline_state == nullptr) {
                 // Pipeline State creation could fail if we haven't properly set up our pipeline descriptor.
                 // If the Metal API validation is enabled, we can find out more information about what
                 // went wrong.  (Metal API validation is enabled by default when a debug build is run
                 // from Xcode)
-                SPDLOG_ERROR("Failed to create pipeline state, error {}",
-                             error->localizedDescription()->cString(NS::UTF8StringEncoding));
+                const char* message = error != nullptr ? error->localizedDescription()->cString(NS::UTF8StringEncoding)
+                                                       : "Metal returned no pipeline state or error";
+                SPDLOG_ERROR("Failed to create pipeline state for shader_id0=0x{:016X} shader_id1=0x{:016X} "
+                             "sample_count={}: {}",
+                             shader_id0, shader_id1, msaa_level, message);
+                continue;
             }
 
             prg->pipeline_state_variants[msaa_level] = pipeline_state;
+            createdPipelineState = true;
         }
+    }
+
+    if (!createdPipelineState) {
+        mShaderProgramPool.erase(key);
+        vertexFunc->release();
+        fragmentFunc->release();
+        pipeline_descriptor->release();
+        library->release();
+        autorelease_pool->release();
+        return nullptr;
     }
 
     LoadShader((struct ShaderProgram*)prg);
@@ -330,8 +374,8 @@ struct ShaderProgram* GfxRenderingAPIMetal::CreateAndLoadNewShader(uint64_t shad
     return (struct ShaderProgram*)prg;
 }
 
-struct ShaderProgram* GfxRenderingAPIMetal::LookupShader(uint64_t shader_id0, uint64_t shader_id1) {
-    auto it = mShaderProgramPool.find(std::make_pair(shader_id0, shader_id1));
+struct ShaderProgram* GfxRenderingAPIMetal::LookupShader(const ShaderProgramKey& key) {
+    auto it = mShaderProgramPool.find(key);
     return it == mShaderProgramPool.end() ? nullptr : (struct ShaderProgram*)&it->second;
 }
 

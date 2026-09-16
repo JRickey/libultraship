@@ -17,6 +17,7 @@
 #include <stdio.h>
 
 #include <any>
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -755,23 +756,98 @@ void Interpreter::Flush() {
     }
 }
 
-static std::set<std::pair<uint64_t,uint64_t>> sFailedShaderIds;
-
 ShaderProgram* Interpreter::LookupOrCreateShaderProgram(uint64_t id0, uint64_t id1) {
-    auto key = std::make_pair(id0, id1);
-    if (sFailedShaderIds.count(key)) {
+    const ShaderProgramKey key = mRapi->MakeShaderProgramKey(id0, id1);
+    if (mFailedShaderKeys.contains(key)) {
         return nullptr; // Previously failed — don't retry
     }
-    ShaderProgram* prg = mRapi->LookupShader(id0, id1);
+    ShaderProgram* prg = mRapi->LookupShader(key);
     if (prg == nullptr) {
         mRapi->UnloadShader(mRenderingState.mShaderProgram);
-        prg = mRapi->CreateAndLoadNewShader(id0, id1);
+        prg = mRapi->CreateAndLoadNewShader(key);
         mRenderingState.mShaderProgram = prg;
         if (prg == nullptr) {
-            sFailedShaderIds.insert(key);
+            mFailedShaderKeys.insert(key);
         }
     }
     return prg;
+}
+
+ShaderPrewarmProgress Interpreter::PrewarmShaders(std::span<const ShaderPermutation> permutations, size_t startIndex,
+                                                   size_t maxNewPrograms) {
+    ShaderPrewarmProgress progress;
+    progress.nextIndex = std::min(startIndex, permutations.size());
+    ShaderProgram* const previousProgram = mRenderingState.mShaderProgram;
+    ShaderProgram* loadedProgram = previousProgram;
+
+    for (size_t i = progress.nextIndex; i < permutations.size(); ++i) {
+        const ShaderPermutation& permutation = permutations[i];
+
+        // Custom shader IDs are allocation-order indices populated by
+        // gfx_push_shader. They are not stable across sessions and therefore
+        // cannot safely appear in a persisted game manifest.
+        if (ShaderIdUnmask(permutation.shaderId1) != -1) {
+            ++progress.skipped;
+            progress.nextIndex = i + 1;
+            continue;
+        }
+
+        const ShaderProgramKey key = mRapi->MakeShaderProgramKey(permutation.shaderId0, permutation.shaderId1);
+        if (mFailedShaderKeys.contains(key)) {
+            ++progress.failed;
+            progress.nextIndex = i + 1;
+            continue;
+        }
+        if (mRapi->LookupShader(key) != nullptr) {
+            ++progress.alreadyCached;
+            progress.nextIndex = i + 1;
+            continue;
+        }
+        if (progress.compiled >= maxNewPrograms) {
+            break;
+        }
+
+        mRapi->UnloadShader(loadedProgram);
+        loadedProgram = mRapi->CreateAndLoadNewShader(key);
+        if (loadedProgram == nullptr) {
+            mFailedShaderKeys.insert(key);
+            ++progress.failed;
+        } else {
+            ++progress.compiled;
+        }
+        progress.nextIndex = i + 1;
+    }
+
+    if (loadedProgram != previousProgram) {
+        mRapi->UnloadShader(loadedProgram);
+        if (previousProgram != nullptr) {
+            mRapi->LoadShader(previousProgram);
+        }
+    }
+
+    progress.complete = progress.nextIndex == permutations.size();
+    return progress;
+}
+
+void Interpreter::InvalidateShaderBindings() {
+    Flush();
+    mRapi->UnloadShader(mRenderingState.mShaderProgram);
+    mRenderingState.mShaderProgram = nullptr;
+    mColorCombinerPool.clear();
+    mPrevCombiner = mColorCombinerPool.end();
+}
+
+void Interpreter::SetTextureFilter(FilteringMode mode) {
+    if (mRapi->GetTextureFilter() == mode) {
+        return;
+    }
+    InvalidateShaderBindings();
+    mRapi->SetTextureFilter(mode);
+}
+
+void Interpreter::EnableSrgbMode() {
+    InvalidateShaderBindings();
+    mRapi->SetSrgbMode();
 }
 
 const char* Interpreter::CCMUXtoStr(uint32_t ccmux) {

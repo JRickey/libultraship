@@ -899,8 +899,19 @@ bool GfxWindowBackendDXGI::IsFrameReady() {
             } else {
                 // Drop frame
                 // printf("Dropping frame\n");
+#ifdef _UWP
+                // Xbox UWP's flip-model swap chain and frame-latency waitable
+                // object already pace submission.  Its frame-statistics
+                // timeline can lag the app timeline under load, causing this
+                // desktop heuristic to reject otherwise valid frames for an
+                // entire scene (often every other frame).  Present the frame
+                // and let DXGI's native queue apply back-pressure instead.
+                mDroppedFrame = false;
+                return true;
+#else
                 mDroppedFrame = true;
                 return false;
+#endif
             }
         }
         double orig_wait = vsyncs_to_wait;
@@ -928,8 +939,13 @@ bool GfxWindowBackendDXGI::IsFrameReady() {
             }
             if (vsyncs_to_wait == 0) {
                 // printf("vsyncs_to_wait became 0 so dropping frame\n");
+#ifdef _UWP
+                mDroppedFrame = false;
+                return true;
+#else
                 mDroppedFrame = true;
                 return false;
+#endif
             }
         }
     }

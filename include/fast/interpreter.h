@@ -701,7 +701,7 @@ class Interpreter {
 
     typedef size_t ShaderId;
     std::stack<ShaderId> mShaderStack;
-    size_t mShadersIndex;
+    size_t mShadersIndex = 0;
     int mInterpolationIndex;
     int mInterpolationIndexTarget;
 };

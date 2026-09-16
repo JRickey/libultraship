@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <cmath>
@@ -64,6 +65,109 @@ GfxRenderingAPIDX11::~GfxRenderingAPIDX11() {
 // without needing a handle to the renderer. libultraship instantiates exactly
 // one GfxRenderingAPIDX11 for the lifetime of the process.
 static GfxRenderingAPIDX11* sDX11InstanceForCapture = nullptr;
+
+namespace {
+
+struct Dx11DrawPerfTrace {
+    bool initialized = false;
+    bool enabled = false;
+    std::chrono::steady_clock::time_point windowStart;
+    uint64_t calls = 0;
+    uint64_t triangles = 0;
+    uint64_t uploadBytes = 0;
+    std::vector<double> mapMs;
+    std::vector<double> drawMs;
+    std::vector<double> stateMs;
+    std::vector<double> totalMs;
+};
+
+Dx11DrawPerfTrace sDx11DrawPerf;
+
+double Dx11DrawPerfAverage(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (double value : values) {
+        sum += value;
+    }
+    return sum / static_cast<double>(values.size());
+}
+
+double Dx11DrawPerfP95(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    std::vector<double> sorted(values);
+    std::sort(sorted.begin(), sorted.end());
+    const double index = 0.95 * static_cast<double>(sorted.size() - 1);
+    const size_t low = static_cast<size_t>(index);
+    const size_t high = std::min(low + 1, sorted.size() - 1);
+    const double weight = index - static_cast<double>(low);
+    return sorted[low] * (1.0 - weight) + sorted[high] * weight;
+}
+
+double Dx11DrawPerfMs(std::chrono::steady_clock::time_point begin,
+                      std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+void Dx11DrawPerfInit() {
+    if (sDx11DrawPerf.initialized) {
+        return;
+    }
+    sDx11DrawPerf.initialized = true;
+#ifdef _UWP
+    sDx11DrawPerf.enabled = true;
+#else
+    sDx11DrawPerf.enabled = std::getenv("SSB64_PERF_TRACE") != nullptr;
+#endif
+    sDx11DrawPerf.windowStart = std::chrono::steady_clock::now();
+}
+
+void Dx11DrawPerfSample(std::chrono::steady_clock::time_point callStart,
+                        std::chrono::steady_clock::time_point mapStart,
+                        std::chrono::steady_clock::time_point mapEnd,
+                        std::chrono::steady_clock::time_point drawStart,
+                        std::chrono::steady_clock::time_point callEnd,
+                        size_t triangles, size_t uploadBytes) {
+    if (!sDx11DrawPerf.enabled) {
+        return;
+    }
+    const double mapMs = Dx11DrawPerfMs(mapStart, mapEnd);
+    const double drawMs = Dx11DrawPerfMs(drawStart, callEnd);
+    const double totalMs = Dx11DrawPerfMs(callStart, callEnd);
+    ++sDx11DrawPerf.calls;
+    sDx11DrawPerf.triangles += triangles;
+    sDx11DrawPerf.uploadBytes += uploadBytes;
+    sDx11DrawPerf.mapMs.push_back(mapMs);
+    sDx11DrawPerf.drawMs.push_back(drawMs);
+    sDx11DrawPerf.stateMs.push_back(std::max(0.0, totalMs - mapMs - drawMs));
+    sDx11DrawPerf.totalMs.push_back(totalMs);
+
+    if (std::chrono::duration<double>(callEnd - sDx11DrawPerf.windowStart).count() < 1.0) {
+        return;
+    }
+    SPDLOG_WARN(
+        "[perf-dx11-draw] calls={} triangles={} upload_kib={:.1f} "
+        "state_ms={:.3f}/{:.3f} map_ms={:.3f}/{:.3f} draw_ms={:.3f}/{:.3f} total_ms={:.3f}/{:.3f}",
+        sDx11DrawPerf.calls, sDx11DrawPerf.triangles,
+        static_cast<double>(sDx11DrawPerf.uploadBytes) / 1024.0,
+        Dx11DrawPerfAverage(sDx11DrawPerf.stateMs), Dx11DrawPerfP95(sDx11DrawPerf.stateMs),
+        Dx11DrawPerfAverage(sDx11DrawPerf.mapMs), Dx11DrawPerfP95(sDx11DrawPerf.mapMs),
+        Dx11DrawPerfAverage(sDx11DrawPerf.drawMs), Dx11DrawPerfP95(sDx11DrawPerf.drawMs),
+        Dx11DrawPerfAverage(sDx11DrawPerf.totalMs), Dx11DrawPerfP95(sDx11DrawPerf.totalMs));
+    sDx11DrawPerf.windowStart = callEnd;
+    sDx11DrawPerf.calls = 0;
+    sDx11DrawPerf.triangles = 0;
+    sDx11DrawPerf.uploadBytes = 0;
+    sDx11DrawPerf.mapMs.clear();
+    sDx11DrawPerf.drawMs.clear();
+    sDx11DrawPerf.stateMs.clear();
+    sDx11DrawPerf.totalMs.clear();
+}
+
+} // namespace
 
 GfxRenderingAPIDX11::GfxRenderingAPIDX11(GfxWindowBackendDXGI* backend) {
     mWindowBackend = backend;
@@ -681,6 +785,8 @@ void GfxRenderingAPIDX11::SetUseAlpha(bool use_alpha) {
 }
 
 void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
+    Dx11DrawPerfInit();
+    const auto perfCallStart = std::chrono::steady_clock::now();
 
     if (mLastDepthTest != mCurrentDepthTest || mLastDepthMask != mCurrentDepthMask) {
         mLastDepthTest = mCurrentDepthTest;
@@ -786,9 +892,11 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
 
     D3D11_MAPPED_SUBRESOURCE ms;
     ZeroMemory(&ms, sizeof(D3D11_MAPPED_SUBRESOURCE));
+    const auto perfMapStart = std::chrono::steady_clock::now();
     mContext->Map(mVertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
     memcpy(ms.pData, buf_vbo, buf_vbo_len * sizeof(float));
     mContext->Unmap(mVertexBuffer.Get(), 0);
+    const auto perfMapEnd = std::chrono::steady_clock::now();
 
     uint32_t stride = mShaderProgram->numFloats * sizeof(float);
     uint32_t offset = 0;
@@ -821,7 +929,11 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         mContext->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
 
+    const auto perfDrawStart = std::chrono::steady_clock::now();
     mContext->Draw(buf_vbo_num_tris * 3, 0);
+    const auto perfCallEnd = std::chrono::steady_clock::now();
+    Dx11DrawPerfSample(perfCallStart, perfMapStart, perfMapEnd, perfDrawStart, perfCallEnd,
+                       buf_vbo_num_tris, buf_vbo_len * sizeof(float));
 }
 
 void GfxRenderingAPIDX11::OnResize() {

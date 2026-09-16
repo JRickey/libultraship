@@ -17,7 +17,10 @@
 #include <stdio.h>
 
 #include <any>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -121,6 +124,107 @@ std::stack<std::string> currentDir;
 #define TEXTURE_CACHE_MAX_SIZE 1024
 
 namespace {
+
+struct InterpreterPerfTrace {
+    bool initialized = false;
+    bool enabled = false;
+    std::chrono::steady_clock::time_point windowStart;
+    uint64_t calls = 0;
+    uint64_t commands = 0;
+    std::vector<double> commandsPerFrame;
+    std::vector<double> setupMs;
+    std::vector<double> walkMs;
+    std::vector<double> flushMs;
+    std::vector<double> composeMs;
+    std::vector<double> totalMs;
+};
+
+InterpreterPerfTrace sInterpreterPerf;
+
+double InterpreterPerfAverage(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (double value : values) {
+        sum += value;
+    }
+    return sum / static_cast<double>(values.size());
+}
+
+double InterpreterPerfP95(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    std::vector<double> sorted(values);
+    std::sort(sorted.begin(), sorted.end());
+    const double index = 0.95 * static_cast<double>(sorted.size() - 1);
+    const size_t low = static_cast<size_t>(index);
+    const size_t high = std::min(low + 1, sorted.size() - 1);
+    const double weight = index - static_cast<double>(low);
+    return sorted[low] * (1.0 - weight) + sorted[high] * weight;
+}
+
+double InterpreterPerfMs(std::chrono::steady_clock::time_point begin,
+                         std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+void InterpreterPerfInit() {
+    if (sInterpreterPerf.initialized) {
+        return;
+    }
+    sInterpreterPerf.initialized = true;
+#ifdef _UWP
+    sInterpreterPerf.enabled = true;
+#else
+    sInterpreterPerf.enabled = std::getenv("SSB64_PERF_TRACE") != nullptr;
+#endif
+    sInterpreterPerf.windowStart = std::chrono::steady_clock::now();
+}
+
+void InterpreterPerfSample(std::chrono::steady_clock::time_point frameStart,
+                           std::chrono::steady_clock::time_point setupEnd,
+                           std::chrono::steady_clock::time_point walkEnd,
+                           std::chrono::steady_clock::time_point flushEnd,
+                           std::chrono::steady_clock::time_point frameEnd,
+                           uint64_t commands) {
+    if (!sInterpreterPerf.enabled) {
+        return;
+    }
+    ++sInterpreterPerf.calls;
+    sInterpreterPerf.commands += commands;
+    sInterpreterPerf.commandsPerFrame.push_back(static_cast<double>(commands));
+    sInterpreterPerf.setupMs.push_back(InterpreterPerfMs(frameStart, setupEnd));
+    sInterpreterPerf.walkMs.push_back(InterpreterPerfMs(setupEnd, walkEnd));
+    sInterpreterPerf.flushMs.push_back(InterpreterPerfMs(walkEnd, flushEnd));
+    sInterpreterPerf.composeMs.push_back(InterpreterPerfMs(flushEnd, frameEnd));
+    sInterpreterPerf.totalMs.push_back(InterpreterPerfMs(frameStart, frameEnd));
+
+    if (std::chrono::duration<double>(frameEnd - sInterpreterPerf.windowStart).count() < 1.0) {
+        return;
+    }
+    SPDLOG_WARN(
+        "[perf-interpreter] frames={} commands={} cmds_per_frame={:.1f}/{:.1f} "
+        "setup_ms={:.3f}/{:.3f} walk_ms={:.3f}/{:.3f} flush_ms={:.3f}/{:.3f} "
+        "compose_ms={:.3f}/{:.3f} total_ms={:.3f}/{:.3f}",
+        sInterpreterPerf.calls, sInterpreterPerf.commands,
+        InterpreterPerfAverage(sInterpreterPerf.commandsPerFrame), InterpreterPerfP95(sInterpreterPerf.commandsPerFrame),
+        InterpreterPerfAverage(sInterpreterPerf.setupMs), InterpreterPerfP95(sInterpreterPerf.setupMs),
+        InterpreterPerfAverage(sInterpreterPerf.walkMs), InterpreterPerfP95(sInterpreterPerf.walkMs),
+        InterpreterPerfAverage(sInterpreterPerf.flushMs), InterpreterPerfP95(sInterpreterPerf.flushMs),
+        InterpreterPerfAverage(sInterpreterPerf.composeMs), InterpreterPerfP95(sInterpreterPerf.composeMs),
+        InterpreterPerfAverage(sInterpreterPerf.totalMs), InterpreterPerfP95(sInterpreterPerf.totalMs));
+    sInterpreterPerf.windowStart = frameEnd;
+    sInterpreterPerf.calls = 0;
+    sInterpreterPerf.commands = 0;
+    sInterpreterPerf.commandsPerFrame.clear();
+    sInterpreterPerf.setupMs.clear();
+    sInterpreterPerf.walkMs.clear();
+    sInterpreterPerf.flushMs.clear();
+    sInterpreterPerf.composeMs.clear();
+    sInterpreterPerf.totalMs.clear();
+}
 
 constexpr size_t PORT_PACKED_GFX_SIZE = sizeof(uint32_t) * 2;
 
@@ -7092,6 +7196,8 @@ void Interpreter::RunGuiOnly() {
 }
 
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
+    InterpreterPerfInit();
+    const auto perfFrameStart = std::chrono::steady_clock::now();
     SpReset();
     mFrameTriAreaPx = 0.0f;
 
@@ -7130,6 +7236,8 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
 
     auto dbg = Ship::Context::GetInstance()->GetGfxDebugger();
     g_exec_stack.start((F3DGfx*)commands);
+    const auto perfSetupEnd = std::chrono::steady_clock::now();
+    uint64_t perfCommandCount = 0;
     while (!g_exec_stack.cmd_stack.empty()) {
         auto cmd = g_exec_stack.cmd_stack.top();
 
@@ -7146,9 +7254,12 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
             g_exec_stack.gfx_path.pop_back();
         }
         gfx_step();
+        ++perfCommandCount;
     }
 
+    const auto perfWalkEnd = std::chrono::steady_clock::now();
     Flush();
+    const auto perfFlushEnd = std::chrono::steady_clock::now();
     mGfxFrameBuffer = 0;
     currentDir = std::stack<std::string>();
 
@@ -7161,6 +7272,8 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
 
         assert(0 && "active framebuffer was never reset back to original");
     }
+    const auto perfFrameEnd = std::chrono::steady_clock::now();
+    InterpreterPerfSample(perfFrameStart, perfSetupEnd, perfWalkEnd, perfFlushEnd, perfFrameEnd, perfCommandCount);
 }
 
 void Interpreter::UpdatePostProcessFromCVars() {

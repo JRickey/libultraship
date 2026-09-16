@@ -1,6 +1,7 @@
 #ifdef ENABLE_DX11
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -389,6 +390,7 @@ void GfxRenderingAPIDX11::LoadShader(struct ShaderProgram* new_prg) {
 }
 
 struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+    const auto trace_start = std::chrono::steady_clock::now();
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
 
@@ -422,6 +424,7 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
 
     HRESULT hr = mD3dCompile(buf, len, nullptr, nullptr, nullptr, "VSMain", "vs_4_0", compile_flags, 0,
                              vs.GetAddressOf(), error_blob.GetAddressOf());
+    const auto trace_after_vs = std::chrono::steady_clock::now();
 
     if (FAILED(hr)) {
         logCompileFailure("VS");
@@ -430,6 +433,7 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
 
     hr = mD3dCompile(buf, len, nullptr, nullptr, nullptr, "PSMain", "ps_4_0", compile_flags, 0, ps.GetAddressOf(),
                      error_blob.GetAddressOf());
+    const auto trace_after_ps = std::chrono::steady_clock::now();
 
     if (FAILED(hr)) {
         logCompileFailure("PS");
@@ -531,6 +535,15 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
     prg->usedTextures[3] = cc_features.used_masks[1];
     prg->usedTextures[4] = cc_features.used_blend[0];
     prg->usedTextures[5] = cc_features.used_blend[1];
+
+#if defined(_UWP)
+    const auto trace_end = std::chrono::steady_clock::now();
+    const double vs_ms = std::chrono::duration<double, std::milli>(trace_after_vs - trace_start).count();
+    const double ps_ms = std::chrono::duration<double, std::milli>(trace_after_ps - trace_after_vs).count();
+    const double total_ms = std::chrono::duration<double, std::milli>(trace_end - trace_start).count();
+    SPDLOG_WARN("[perf-shader] id0=0x{:016X} id1=0x{:016X} vs_ms={:.3f} ps_ms={:.3f} total_ms={:.3f}",
+                shader_id0, shader_id1, vs_ms, ps_ms, total_ms);
+#endif
 
     return (struct ShaderProgram*)(mShaderProgram = prg);
 }

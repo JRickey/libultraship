@@ -137,6 +137,12 @@ struct InterpreterPerfTrace {
     std::vector<double> flushMs;
     std::vector<double> composeMs;
     std::vector<double> totalMs;
+    uint64_t boundsCalls = 0;
+    double boundsMs = 0.0;
+    uint64_t traceCalls = 0;
+    double traceMs = 0.0;
+    uint64_t handlerCalls[256]{};
+    double handlerMs[256]{};
 };
 
 InterpreterPerfTrace sInterpreterPerf;
@@ -169,6 +175,28 @@ double InterpreterPerfMs(std::chrono::steady_clock::time_point begin,
                          std::chrono::steady_clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
 }
+
+class InterpreterHandlerPerfScope {
+  public:
+    explicit InterpreterHandlerPerfScope(uint8_t opcode) : mOpcode(opcode) {
+        if (sInterpreterPerf.enabled) {
+            mStart = std::chrono::steady_clock::now();
+        }
+    }
+
+    ~InterpreterHandlerPerfScope() {
+        if (!sInterpreterPerf.enabled) {
+            return;
+        }
+        ++sInterpreterPerf.handlerCalls[mOpcode];
+        sInterpreterPerf.handlerMs[mOpcode] +=
+            InterpreterPerfMs(mStart, std::chrono::steady_clock::now());
+    }
+
+  private:
+    uint8_t mOpcode;
+    std::chrono::steady_clock::time_point mStart{};
+};
 
 void InterpreterPerfInit() {
     if (sInterpreterPerf.initialized) {
@@ -215,6 +243,33 @@ void InterpreterPerfSample(std::chrono::steady_clock::time_point frameStart,
         InterpreterPerfAverage(sInterpreterPerf.flushMs), InterpreterPerfP95(sInterpreterPerf.flushMs),
         InterpreterPerfAverage(sInterpreterPerf.composeMs), InterpreterPerfP95(sInterpreterPerf.composeMs),
         InterpreterPerfAverage(sInterpreterPerf.totalMs), InterpreterPerfP95(sInterpreterPerf.totalMs));
+
+    std::vector<uint16_t> activeOpcodes;
+    activeOpcodes.reserve(256);
+    for (uint16_t opcode = 0; opcode < 256; ++opcode) {
+        if (sInterpreterPerf.handlerCalls[opcode] != 0) {
+            activeOpcodes.push_back(opcode);
+        }
+    }
+    std::sort(activeOpcodes.begin(), activeOpcodes.end(), [](uint16_t lhs, uint16_t rhs) {
+        return sInterpreterPerf.handlerMs[lhs] > sInterpreterPerf.handlerMs[rhs];
+    });
+    std::string topHandlers;
+    const size_t topCount = std::min<size_t>(activeOpcodes.size(), 8);
+    for (size_t i = 0; i < topCount; ++i) {
+        const uint16_t opcode = activeOpcodes[i];
+        if (!topHandlers.empty()) {
+            topHandlers += ", ";
+        }
+        topHandlers += fmt::format("0x{:02X}:{}:{:.3f}ms", opcode,
+                                   sInterpreterPerf.handlerCalls[opcode],
+                                   sInterpreterPerf.handlerMs[opcode]);
+    }
+    SPDLOG_WARN(
+        "[perf-gfx-step] bounds={}:{:.3f}ms trace={}:{:.3f}ms handlers=[{}]",
+        sInterpreterPerf.boundsCalls, sInterpreterPerf.boundsMs,
+        sInterpreterPerf.traceCalls, sInterpreterPerf.traceMs, topHandlers);
+
     sInterpreterPerf.windowStart = frameEnd;
     sInterpreterPerf.calls = 0;
     sInterpreterPerf.commands = 0;
@@ -224,6 +279,12 @@ void InterpreterPerfSample(std::chrono::steady_clock::time_point frameStart,
     sInterpreterPerf.flushMs.clear();
     sInterpreterPerf.composeMs.clear();
     sInterpreterPerf.totalMs.clear();
+    sInterpreterPerf.boundsCalls = 0;
+    sInterpreterPerf.boundsMs = 0.0;
+    sInterpreterPerf.traceCalls = 0;
+    sInterpreterPerf.traceMs = 0.0;
+    std::fill(std::begin(sInterpreterPerf.handlerCalls), std::end(sInterpreterPerf.handlerCalls), 0);
+    std::fill(std::begin(sInterpreterPerf.handlerMs), std::end(sInterpreterPerf.handlerMs), 0.0);
 }
 
 constexpr size_t PORT_PACKED_GFX_SIZE = sizeof(uint32_t) * 2;
@@ -6793,7 +6854,18 @@ static void gfx_step() {
      * Run's outer loop will pick up the parent frame (or exit if stack is
      * empty). */
     {
-        if (sDLBoundsCheck && sDLBoundsCheck((uintptr_t)cmd) == kDLBoundsWalkedPast) {
+        int boundsResult = kDLBoundsUnknown;
+        if (sDLBoundsCheck) {
+            const auto boundsStart = sInterpreterPerf.enabled ? std::chrono::steady_clock::now()
+                                                              : std::chrono::steady_clock::time_point{};
+            boundsResult = sDLBoundsCheck((uintptr_t)cmd);
+            if (sInterpreterPerf.enabled) {
+                ++sInterpreterPerf.boundsCalls;
+                sInterpreterPerf.boundsMs +=
+                    InterpreterPerfMs(boundsStart, std::chrono::steady_clock::now());
+            }
+        }
+        if (boundsResult == kDLBoundsWalkedPast) {
             static int sCount = 0;
             if (sCount < 10) {
                 sCount++;
@@ -6821,8 +6893,15 @@ static void gfx_step() {
     int8_t opcode = (int8_t)(cmd->words.w0 >> 24);
 
     if (sGbiTraceCallback) {
+        const auto traceStart = sInterpreterPerf.enabled ? std::chrono::steady_clock::now()
+                                                         : std::chrono::steady_clock::time_point{};
         sGbiTraceCallback((uintptr_t)cmd->words.w0, (uintptr_t)cmd->words.w1,
                           (int)g_exec_stack.cmd_stack.size() - 1);
+        if (sInterpreterPerf.enabled) {
+            ++sInterpreterPerf.traceCalls;
+            sInterpreterPerf.traceMs +=
+                InterpreterPerfMs(traceStart, std::chrono::steady_clock::now());
+        }
     }
 
 #ifdef USE_GBI_TRACE
@@ -6838,6 +6917,8 @@ static void gfx_step() {
         SPDLOG_INFO(TRACE, (uint8_t)opcode, cmd->words.trace.file, cmd->words.trace.idx, cmd->words.w0, cmd->words.w1);
     }
 #endif
+
+    InterpreterHandlerPerfScope handlerPerf(static_cast<uint8_t>(opcode));
 
     if (opcode == F3DEX2_G_LOAD_UCODE) {
         gfx_set_ucode_handler((UcodeHandlers)(cmd->words.w0 & 0xFFFFFF));

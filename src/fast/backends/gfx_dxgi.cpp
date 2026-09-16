@@ -3,9 +3,13 @@
 #include <stdint.h>
 #include <math.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 #include <windowsx.h> // GET_X_LPARAM(), GET_Y_LPARAM()
@@ -548,6 +552,93 @@ static BOOL CALLBACK WIN_ResourceNameCallback(HMODULE hModule, LPCTSTR lpType, L
 
 static uint64_t qpc_init, qpc_freq;
 
+namespace {
+
+struct DxgiPerfTrace {
+    bool initialized = false;
+    bool enabled = false;
+    std::chrono::steady_clock::time_point windowStart;
+    std::chrono::steady_clock::time_point callStart;
+    std::chrono::steady_clock::time_point beginReturn;
+    double eventsMs = 0.0;
+    double paceMs = 0.0;
+    double presentMs = 0.0;
+    std::vector<double> events;
+    std::vector<double> pace;
+    std::vector<double> present;
+    std::vector<double> finish;
+    std::vector<double> latency;
+    std::vector<double> total;
+};
+
+DxgiPerfTrace sDxgiPerf;
+
+double DxgiPerfMs(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+double DxgiPerfAverage(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (double value : values) {
+        sum += value;
+    }
+    return sum / static_cast<double>(values.size());
+}
+
+double DxgiPerfP95(const std::vector<double>& values) {
+    if (values.empty()) {
+        return 0.0;
+    }
+    std::vector<double> sorted(values);
+    std::sort(sorted.begin(), sorted.end());
+    const double index = 0.95 * static_cast<double>(sorted.size() - 1);
+    const size_t low = static_cast<size_t>(index);
+    const size_t high = std::min(low + 1, sorted.size() - 1);
+    const double weight = index - static_cast<double>(low);
+    return sorted[low] * (1.0 - weight) + sorted[high] * weight;
+}
+
+void DxgiPerfInit() {
+    if (sDxgiPerf.initialized) {
+        return;
+    }
+    sDxgiPerf.initialized = true;
+#ifdef _UWP
+    sDxgiPerf.enabled = true;
+#else
+    sDxgiPerf.enabled = std::getenv("SSB64_PERF_TRACE") != nullptr;
+#endif
+    sDxgiPerf.windowStart = std::chrono::steady_clock::now();
+}
+
+void DxgiPerfLog(std::chrono::steady_clock::time_point now) {
+    if (!sDxgiPerf.enabled ||
+        std::chrono::duration<double>(now - sDxgiPerf.windowStart).count() < 1.0) {
+        return;
+    }
+    SPDLOG_WARN(
+        "[perf-dxgi] presents={} events_ms={:.3f}/{:.3f} pace_ms={:.3f}/{:.3f} "
+        "present_ms={:.3f}/{:.3f} finish_ms={:.3f}/{:.3f} latency_ms={:.3f}/{:.3f} total_ms={:.3f}/{:.3f}",
+        sDxgiPerf.total.size(), DxgiPerfAverage(sDxgiPerf.events), DxgiPerfP95(sDxgiPerf.events),
+        DxgiPerfAverage(sDxgiPerf.pace), DxgiPerfP95(sDxgiPerf.pace),
+        DxgiPerfAverage(sDxgiPerf.present), DxgiPerfP95(sDxgiPerf.present),
+        DxgiPerfAverage(sDxgiPerf.finish), DxgiPerfP95(sDxgiPerf.finish),
+        DxgiPerfAverage(sDxgiPerf.latency), DxgiPerfP95(sDxgiPerf.latency),
+        DxgiPerfAverage(sDxgiPerf.total), DxgiPerfP95(sDxgiPerf.total));
+    sDxgiPerf.windowStart = now;
+    sDxgiPerf.events.clear();
+    sDxgiPerf.pace.clear();
+    sDxgiPerf.present.clear();
+    sDxgiPerf.finish.clear();
+    sDxgiPerf.latency.clear();
+    sDxgiPerf.total.clear();
+}
+
+} // namespace
+
 GfxWindowBackendDXGI::~GfxWindowBackendDXGI() {
 }
 
@@ -937,6 +1028,9 @@ bool GfxWindowBackendDXGI::IsFrameReady() {
 }
 
 void GfxWindowBackendDXGI::SwapBuffersBegin() {
+    DxgiPerfInit();
+    sDxgiPerf.callStart = std::chrono::steady_clock::now();
+
     // mLengthInVsyncFrames (now mVsyncEnabled) was used as present interval. Present interval >1 (aka fractional
     // V-Sync) breaks VRR and introduces even more input lag than capping via normal V-Sync does. Get the present
     // interval the user wants instead (V-Sync toggle).
@@ -948,6 +1042,8 @@ void GfxWindowBackendDXGI::SwapBuffersBegin() {
     // regular engine event pass is running.
     uwp_ProcessEvents();
 #endif
+
+    const auto eventsEnd = std::chrono::steady_clock::now();
 
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
@@ -968,23 +1064,33 @@ void GfxWindowBackendDXGI::SwapBuffersBegin() {
         QueryPerformanceCounter(&t);
         t.QuadPart = qpc_to_100ns(t.QuadPart);
     }
+    const auto paceEnd = std::chrono::steady_clock::now();
     QueryPerformanceCounter(&t);
     mPreviousPresentTime = t;
+    const auto presentBegin = std::chrono::steady_clock::now();
     if (mTearingSupport && !mVsyncEnabled) {
         // 512: DXGI_PRESENT_ALLOW_TEARING - allows for true V-Sync off with flip model
         ThrowIfFailed(swap_chain->Present(mVsyncEnabled, DXGI_PRESENT_ALLOW_TEARING));
     } else {
         ThrowIfFailed(swap_chain->Present(mVsyncEnabled, 0));
     }
+    const auto presentEnd = std::chrono::steady_clock::now();
 
     UINT this_present_id;
     if (swap_chain->GetLastPresentCount(&this_present_id) == S_OK) {
         mPendingFrameStats.insert(std::make_pair(this_present_id, mVsyncEnabled));
     }
     mDroppedFrame = false;
+    if (sDxgiPerf.enabled) {
+        sDxgiPerf.eventsMs = DxgiPerfMs(sDxgiPerf.callStart, eventsEnd);
+        sDxgiPerf.paceMs = DxgiPerfMs(eventsEnd, paceEnd);
+        sDxgiPerf.presentMs = DxgiPerfMs(presentBegin, presentEnd);
+        sDxgiPerf.beginReturn = presentEnd;
+    }
 }
 
 void GfxWindowBackendDXGI::SwapBuffersEnd() {
+    const auto endBegin = std::chrono::steady_clock::now();
     LARGE_INTEGER t0, t1, t2;
     QueryPerformanceCounter(&t0);
     QueryPerformanceCounter(&t1);
@@ -1015,6 +1121,7 @@ void GfxWindowBackendDXGI::SwapBuffersEnd() {
         }
         // else TODO: maybe sleep until some estimated time the frame will be shown to reduce lag
     }
+    const auto latencyEnd = std::chrono::steady_clock::now();
 
     DXGI_FRAME_STATISTICS stats;
     swap_chain->GetFrameStatistics(&stats);
@@ -1022,6 +1129,17 @@ void GfxWindowBackendDXGI::SwapBuffersEnd() {
     QueryPerformanceCounter(&t2);
 
     mZeroLatency = mPendingFrameStats.rbegin()->first == stats.PresentCount;
+
+    if (sDxgiPerf.enabled) {
+        const auto now = std::chrono::steady_clock::now();
+        sDxgiPerf.events.push_back(sDxgiPerf.eventsMs);
+        sDxgiPerf.pace.push_back(sDxgiPerf.paceMs);
+        sDxgiPerf.present.push_back(sDxgiPerf.presentMs);
+        sDxgiPerf.finish.push_back(DxgiPerfMs(sDxgiPerf.beginReturn, endBegin));
+        sDxgiPerf.latency.push_back(DxgiPerfMs(endBegin, latencyEnd));
+        sDxgiPerf.total.push_back(DxgiPerfMs(sDxgiPerf.callStart, now));
+        DxgiPerfLog(now);
+    }
 
     // printf(L"done %I64u gpu:%d wait:%d freed:%I64u frame:%u %u monitor:%u t:%I64u\n", (unsigned long
     // long)(t0.QuadPart - qpc_init), (int)(t1.QuadPart - t0.QuadPart), (int)(t2.QuadPart - t0.QuadPart), (unsigned

@@ -1,0 +1,43 @@
+diff --git a/backends/imgui_impl_win32.cpp b/backends/imgui_impl_win32.cpp
+index f5939e85..0dd398ce 100644
+--- a/backends/imgui_impl_win32.cpp
++++ b/backends/imgui_impl_win32.cpp
+@@ -116,6 +116,8 @@ static void ImGui_ImplWin32_InitMultiViewportSupport(bool platform_has_own_dc);
+ static void ImGui_ImplWin32_ShutdownMultiViewportSupport();
+ static void ImGui_ImplWin32_UpdateMonitors();
+ 
++extern "C" __declspec(dllimport) void uwp_GetScreenSize(int* x, int* y);
++
+ struct ImGui_ImplWin32_Data
+ {
+     HWND                        hWnd;
+@@ -488,9 +490,15 @@ void    ImGui_ImplWin32_NewFrame()
+     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+ 
+     // Setup display size (every frame to accommodate for window resizing)
++#ifndef _UWP
+     RECT rect = { 0, 0, 0, 0 };
+     ::GetClientRect(bd->hWnd, &rect);
+     io.DisplaySize = ImVec2((float)(rect.right - rect.left), (float)(rect.bottom - rect.top));
++#else
++    int width = 1920, height = 1080;
++    uwp_GetScreenSize(&width, &height);
++    io.DisplaySize = ImVec2((float)width, (float)height);
++#endif
+     if (bd->WantUpdateMonitors)
+         ImGui_ImplWin32_UpdateMonitors();
+ 
+diff --git a/imgui.cpp b/imgui.cpp
+index 573efe24..2c243a78 100644
+--- a/imgui.cpp
++++ b/imgui.cpp
+@@ -10903,7 +10903,9 @@ static void ImGui::ErrorCheckNewFrameSanityChecks()
+             IM_ASSERT(g.PlatformIO.Platform_SetWindowPos  != NULL && "Platform init didn't install handlers?");
+             IM_ASSERT(g.PlatformIO.Platform_GetWindowSize != NULL && "Platform init didn't install handlers?");
+             IM_ASSERT(g.PlatformIO.Platform_SetWindowSize != NULL && "Platform init didn't install handlers?");
++#ifndef _UWP
+             IM_ASSERT(g.PlatformIO.Monitors.Size > 0 && "Platform init didn't setup Monitors list?");
++#endif
+             IM_ASSERT((g.Viewports[0]->PlatformUserData != NULL || g.Viewports[0]->PlatformHandle != NULL) && "Platform init didn't setup main viewport.");
+             if (g.IO.ConfigDockingTransparentPayload && (g.IO.ConfigFlags & ImGuiConfigFlags_DockingEnable))
+                 IM_ASSERT(g.PlatformIO.Platform_SetWindowAlpha != NULL && "Platform_SetWindowAlpha handler is required to use io.ConfigDockingTransparent!");

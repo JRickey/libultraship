@@ -388,6 +388,34 @@ bool gfxPointerInTrustedLowVARange(const void* ptr) {
     return false;
 }
 
+#ifdef _WIN32
+/* VirtualQuery is surprisingly expensive in the Xbox UWP sandbox (roughly
+ * 100 us per call in the measured build). gfx_check_image_signature probes
+ * every ordinary G_SETTIMG pointer, so an uncached query here consumed most
+ * of the renderer's frame budget in texture-heavy scenes.
+ *
+ * Cache readable VirtualQuery regions only for the duration of one Fast3D
+ * walk. Memory mappings must remain stable while a submitted display list is
+ * being interpreted anyway, and clearing this before every walk means a
+ * freed/reprotected region is revalidated on the next frame rather than
+ * becoming a permanently trusted address. */
+struct ReadableRegionCacheEntry {
+    uintptr_t begin;
+    uintptr_t end;
+};
+
+constexpr size_t kReadableRegionCacheCapacity = 32;
+thread_local ReadableRegionCacheEntry sReadableRegionCache[kReadableRegionCacheCapacity]{};
+thread_local size_t sReadableRegionCacheCount = 0;
+
+void gfxResetReadableRegionCache() {
+    sReadableRegionCacheCount = 0;
+}
+#else
+void gfxResetReadableRegionCache() {
+}
+#endif
+
 bool gfxPointerHasReadableBytes(const void* ptr, size_t size) {
     if (ptr == nullptr || size == 0) {
         return false;
@@ -396,6 +424,17 @@ bool gfxPointerHasReadableBytes(const void* ptr, size_t size) {
 #ifdef _WIN32
     const uint8_t* cursor = reinterpret_cast<const uint8_t*>(ptr);
     size_t remaining = size;
+
+    const uintptr_t requestBegin = reinterpret_cast<uintptr_t>(cursor);
+    if (size > UINTPTR_MAX - requestBegin) {
+        return false;
+    }
+    const uintptr_t requestEnd = requestBegin + size;
+    for (size_t i = 0; i < sReadableRegionCacheCount; ++i) {
+        if (requestBegin >= sReadableRegionCache[i].begin && requestEnd <= sReadableRegionCache[i].end) {
+            return true;
+        }
+    }
 
     while (remaining != 0) {
         MEMORY_BASIC_INFORMATION mbi = {};
@@ -423,6 +462,13 @@ bool gfxPointerHasReadableBytes(const void* ptr, size_t size) {
         }
 
         uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        uintptr_t regionBegin = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        if (regionEnd <= reinterpret_cast<uintptr_t>(cursor)) {
+            return false;
+        }
+        if (sReadableRegionCacheCount < kReadableRegionCacheCapacity) {
+            sReadableRegionCache[sReadableRegionCacheCount++] = { regionBegin, regionEnd };
+        }
         size_t available = regionEnd - reinterpret_cast<uintptr_t>(cursor);
 
         if (available >= remaining) {
@@ -6884,6 +6930,8 @@ static void gfx_step() {
 }
 
 void Interpreter::SpReset() {
+    gfxResetReadableRegionCache();
+
     while (!mShaderStack.empty()) {
         mShaderStack.pop();
     }

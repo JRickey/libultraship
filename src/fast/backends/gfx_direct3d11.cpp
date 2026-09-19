@@ -510,6 +510,8 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
     prg->usedTextures[4] = cc_features.used_blend[0];
     prg->usedTextures[SHADER_PALETTE_TEXTURE] = cc_features.used_palette[0] || cc_features.used_palette[1];
     prg->usedTextures[5] = cc_features.used_blend[1];
+    prg->usedPalettes[0] = cc_features.used_palette[0];
+    prg->usedPalettes[1] = cc_features.used_palette[1];
 
     return (struct ShaderProgram*)(mShaderProgram = prg);
 }
@@ -557,6 +559,8 @@ void GfxRenderingAPIDX11::UploadTexture(const uint8_t* rgba32_buf, uint32_t widt
     // Create texture
 
     TextureData* texture_data = &mTextures[mCurrentTextureIds[mCurrentTile]];
+    texture_data->inherited_auto_mipmap_sampler = texture_data->auto_mipmaps;
+    texture_data->reported_nonpoint_index_sampler = false;
     texture_data->width = width;
     texture_data->height = height;
 
@@ -600,6 +604,8 @@ void GfxRenderingAPIDX11::UploadTextureMip(const uint8_t* rgba32_buf, uint32_t w
     TextureData* texture_data = &mTextures[mCurrentTextureIds[mCurrentTile]];
 
     if (level == 0) {
+        texture_data->inherited_auto_mipmap_sampler = false;
+        texture_data->reported_nonpoint_index_sampler = false;
         texture_data->width = width;
         texture_data->height = height;
         texture_data->mip_levels = totalLevels;
@@ -655,6 +661,7 @@ void GfxRenderingAPIDX11::SetSamplerParameters(int tile, bool linear_filter, uin
     sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
 
     texture_data->linear_filtering = linear_filter;
+    texture_data->reported_nonpoint_index_sampler = false;
 
     // This function is called twice per texture, the first one only to set default values.
     // Maybe that could be skipped? Anyway, make sure to release the first default sampler
@@ -800,22 +807,37 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
             if (mCurrentTextureIds[i] >= mTextures.size()) {
                 continue;
             }
-            if (mLastResourceViews[i].Get() != mTextures[mCurrentTextureIds[i]].resource_view.Get()) {
-                mLastResourceViews[i] = mTextures[mCurrentTextureIds[i]].resource_view.Get();
-                mContext->PSSetShaderResources(i, 1, mTextures[mCurrentTextureIds[i]].resource_view.GetAddressOf());
+            TextureData& texture = mTextures[mCurrentTextureIds[i]];
+            if (i < 2 && mShaderProgram->usedPalettes[i] && texture.sampler_state != nullptr &&
+                !texture.reported_nonpoint_index_sampler) {
+                D3D11_SAMPLER_DESC samplerDesc;
+                texture.sampler_state->GetDesc(&samplerDesc);
+                if (samplerDesc.Filter != D3D11_FILTER_MIN_MAG_MIP_POINT) {
+                    SPDLOG_WARN(
+                        "[CI-SAMPLER-DIAG] Non-point sampler bound to palette-index texture: slot={}, texture_id={}, "
+                        "filter={}, inherited_auto_mipmaps={}, requested_linear={}, dimensions={}x{}, mip_levels={}",
+                        i, mCurrentTextureIds[i], static_cast<uint32_t>(samplerDesc.Filter),
+                        texture.inherited_auto_mipmap_sampler, texture.linear_filtering, texture.width, texture.height,
+                        texture.mip_levels);
+                    texture.reported_nonpoint_index_sampler = true;
+                }
+            }
+            if (mLastResourceViews[i].Get() != texture.resource_view.Get()) {
+                mLastResourceViews[i] = texture.resource_view.Get();
+                mContext->PSSetShaderResources(i, 1, texture.resource_view.GetAddressOf());
 
                 if (mCurrentFilterMode == FILTER_THREE_POINT) {
-                    mPerDrawCbData.mTextures[i].width = mTextures[mCurrentTextureIds[i]].width;
-                    mPerDrawCbData.mTextures[i].height = mTextures[mCurrentTextureIds[i]].height;
-                    mPerDrawCbData.mTextures[i].linear_filtering = mTextures[mCurrentTextureIds[i]].linear_filtering;
+                    mPerDrawCbData.mTextures[i].width = texture.width;
+                    mPerDrawCbData.mTextures[i].height = texture.height;
+                    mPerDrawCbData.mTextures[i].linear_filtering = texture.linear_filtering;
                     textures_changed = true;
                 }
 
-                if (mLastSamplerStates[i].Get() != mTextures[mCurrentTextureIds[i]].sampler_state.Get()) {
-                    mLastSamplerStates[i] = mTextures[mCurrentTextureIds[i]].sampler_state.Get();
+                if (mLastSamplerStates[i].Get() != texture.sampler_state.Get()) {
+                    mLastSamplerStates[i] = texture.sampler_state.Get();
                 }
             }
-            mContext->PSSetSamplers(i, 1, mTextures[mCurrentTextureIds[i]].sampler_state.GetAddressOf());
+            mContext->PSSetSamplers(i, 1, texture.sampler_state.GetAddressOf());
         }
     }
 

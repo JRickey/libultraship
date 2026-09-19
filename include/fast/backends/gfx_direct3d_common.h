@@ -59,6 +59,10 @@ struct TextureData {
     uint32_t mip_levels;
     bool linear_filtering;
     bool auto_mipmaps;
+    // Diagnostic state for detecting a recycled auto-mipmap sampler on a
+    // single-level palette-index texture. These fields do not affect rendering.
+    bool inherited_auto_mipmap_sampler;
+    bool reported_nonpoint_index_sampler;
 };
 
 struct FramebufferDX11 {
@@ -81,6 +85,7 @@ struct ShaderProgramD3D11 {
     uint8_t numInputs;
     uint8_t numFloats;
     bool usedTextures[SHADER_MAX_TEXTURES];
+    bool usedPalettes[2];
 };
 
 class GfxWindowBackendDXGI;

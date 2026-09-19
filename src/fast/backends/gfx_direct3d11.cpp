@@ -275,7 +275,6 @@ void GfxRenderingAPIDX11::Init() {
 
     ThrowIfFailed(mDevice->CreateBuffer(&vertex_buffer_desc, nullptr, mVertexBuffer.GetAddressOf()),
                   mWindowBackend->GetWindowHandle(), "Failed to create vertex buffer.");
-    mVertexBufferRing.push_back(mVertexBuffer);
 
     // Create per-frame constant buffer
 
@@ -1075,22 +1074,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
 
     // Set vertex buffer data
 
-    // As with the diagnostic per-draw constant-buffer ring, give each draw a
-    // distinct vertex-buffer object within the frame. This tests whether the
-    // Xbox driver is exposing a later WRITE_DISCARD rename to an earlier draw.
-    if (mVertexBufferRingIndex >= mVertexBufferRing.size()) {
-        D3D11_BUFFER_DESC vertexBufferDesc = {};
-        vertexBufferDesc.Usage = D3D11_USAGE_DYNAMIC;
-        vertexBufferDesc.ByteWidth = 256 * 32 * 3 * sizeof(float);
-        vertexBufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        vertexBufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        Microsoft::WRL::ComPtr<ID3D11Buffer> vertexBuffer;
-        ThrowIfFailed(mDevice->CreateBuffer(&vertexBufferDesc, nullptr, vertexBuffer.GetAddressOf()),
-                      mWindowBackend->GetWindowHandle(), "Failed to grow vertex buffer ring.");
-        mVertexBufferRing.push_back(vertexBuffer);
-    }
-    mVertexBuffer = mVertexBufferRing[mVertexBufferRingIndex++];
-
     D3D11_MAPPED_SUBRESOURCE ms;
     ZeroMemory(&ms, sizeof(D3D11_MAPPED_SUBRESOURCE));
     mContext->Map(mVertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
@@ -1100,8 +1083,10 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
     uint32_t stride = mShaderProgram->numFloats * sizeof(float);
     uint32_t offset = 0;
 
-    mLastVertexBufferStride = stride;
-    mContext->IASetVertexBuffers(0, 1, mVertexBuffer.GetAddressOf(), &stride, &offset);
+    if (mLastVertexBufferStride != stride) {
+        mLastVertexBufferStride = stride;
+        mContext->IASetVertexBuffers(0, 1, mVertexBuffer.GetAddressOf(), &stride, &offset);
+    }
 
     if (mLastShaderProgram != mShaderProgram) {
         mLastShaderProgram = mShaderProgram;
@@ -1156,7 +1141,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
             ID3D11PixelShader* actualPixelShader = nullptr;
             ID3D11Buffer* actualPixelDrawCb = nullptr;
             ID3D11Buffer* actualVertexDrawCb = nullptr;
-            ID3D11Buffer* actualVertexBuffer = nullptr;
             ID3D11InputLayout* actualInputLayout = nullptr;
             ID3D11BlendState* actualBlendState = nullptr;
             ID3D11DepthStencilState* actualDepthState = nullptr;
@@ -1168,8 +1152,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
             UINT stencilRef = 0;
             UINT scissorCount = 1;
             UINT viewportCount = 1;
-            UINT actualVertexStride = 0;
-            UINT actualVertexOffset = 0;
             D3D11_RECT scissor = {};
             D3D11_VIEWPORT viewport = {};
             D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
@@ -1178,7 +1160,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
             mContext->PSGetShader(&actualPixelShader, nullptr, nullptr);
             mContext->PSGetConstantBuffers(1, 1, &actualPixelDrawCb);
             mContext->VSGetConstantBuffers(1, 1, &actualVertexDrawCb);
-            mContext->IAGetVertexBuffers(0, 1, &actualVertexBuffer, &actualVertexStride, &actualVertexOffset);
             mContext->IAGetInputLayout(&actualInputLayout);
             mContext->IAGetPrimitiveTopology(&topology);
             mContext->OMGetBlendState(&actualBlendState, blendFactor, &sampleMask);
@@ -1197,8 +1178,7 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
                                                                  sizeof(mPerDrawCbData));
             SPDLOG_INFO(
                 "[CI-WIDE-DRAW-DIAG] frame={} tris={} shader={:016x}:{:016x} textures={},{},{} "
-                "shader_state=vs{}:ps{}:layout{} cb=ps{}:vs{} vb={}:stride{}:offset{} "
-                "pipeline=blend{}:depth{}:raster{}:topology{} "
+                "shader_state=vs{}:ps{}:layout{} cb=ps{}:vs{} pipeline=blend{}:depth{}:raster{}:topology{} "
                 "dirty=combiner{}:custom{} vertex_hash={:016x} draw_cb_hash={:016x} "
                 "palette0=[{:.3f},{:.3f},{:.3f},{:.3f}] uv0=[{:.3f},{:.3f},{:.3f},{:.3f}] "
                 "pos=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] texcoord=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] "
@@ -1207,9 +1187,7 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
                 texture0Id, texture1Id, paletteId, actualVertexShader == mShaderProgram->vertex_shader.Get(),
                 actualPixelShader == mShaderProgram->pixel_shader.Get(),
                 actualInputLayout == mShaderProgram->input_layout.Get(), actualPixelDrawCb == mPerDrawCb.Get(),
-                actualVertexDrawCb == mPerDrawCb.Get(), actualVertexBuffer == mVertexBuffer.Get(),
-                actualVertexStride == stride, actualVertexOffset == offset,
-                actualBlendState == mShaderProgram->blend_state.Get(),
+                actualVertexDrawCb == mPerDrawCb.Get(), actualBlendState == mShaderProgram->blend_state.Get(),
                 actualDepthState == mDepthStencilState.Get(), actualRasterizerState == mRasterizerState.Get(),
                 topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, diagnosticCombinerWasDirty,
                 diagnosticCustomWasDirty, vertexHash, drawUniformHash, mPerDrawCbData.palette_params[0][0],
@@ -1232,9 +1210,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
             }
             if (actualVertexDrawCb != nullptr) {
                 actualVertexDrawCb->Release();
-            }
-            if (actualVertexBuffer != nullptr) {
-                actualVertexBuffer->Release();
             }
             if (actualInputLayout != nullptr) {
                 actualInputLayout->Release();
@@ -1266,7 +1241,6 @@ void GfxRenderingAPIDX11::OnResize() {
 
 void GfxRenderingAPIDX11::StartFrame() {
     mDiagnosticFrameNumber++;
-    mVertexBufferRingIndex = 0;
     mPerDrawCbRingIndex = 0;
     // Set per-frame constant buffer
     ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };

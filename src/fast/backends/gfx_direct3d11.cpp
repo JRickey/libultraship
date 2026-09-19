@@ -1012,15 +1012,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         mContext->Map(mPerDrawCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
         memcpy(ms.pData, &mPerDrawCbData, sizeof(PerDrawCB));
         mContext->Unmap(mPerDrawCb.Get(), 0);
-
-        // D3D11_MAP_WRITE_DISCARD may rename a dynamic buffer. Re-assert the
-        // binding after the rename so both shader stages consume the version
-        // just populated for this draw. This is normally implicit in D3D11,
-        // but the Xbox UWP driver has shown intermittent use of later per-draw
-        // UV state for already-submitted indexed-background draws.
-        ID3D11Buffer* perDrawBuffer = mPerDrawCb.Get();
-        mContext->PSSetConstantBuffers(1, 1, &perDrawBuffer);
-        mContext->VSSetConstantBuffers(1, 1, &perDrawBuffer);
         mCombinerUniformsDirty = false;
         mCustomUniformsDirty = false;
     }

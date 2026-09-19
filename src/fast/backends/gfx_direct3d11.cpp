@@ -50,14 +50,6 @@ using namespace Microsoft::WRL; // For ComPtr
 
 namespace Fast {
 
-static uint64_t DiagnosticHashBytes(const uint8_t* data, size_t size) {
-    uint64_t hash = 1469598103934665603ull;
-    for (size_t i = 0; i < size; i++) {
-        hash = (hash ^ data[i]) * 1099511628211ull;
-    }
-    return hash;
-}
-
 GfxRenderingAPIDX11::~GfxRenderingAPIDX11() {
 }
 
@@ -518,13 +510,6 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
     prg->usedTextures[4] = cc_features.used_blend[0];
     prg->usedTextures[SHADER_PALETTE_TEXTURE] = cc_features.used_palette[0] || cc_features.used_palette[1];
     prg->usedTextures[5] = cc_features.used_blend[1];
-    prg->usedPalettes[0] = cc_features.used_palette[0];
-    prg->usedPalettes[1] = cc_features.used_palette[1];
-    if (prg->usedPalettes[0] || prg->usedPalettes[1]) {
-        SPDLOG_INFO("[CI-SHADER-DIAG] shader={:016x}:{:016x} palette_slots={},{} texture_slots={},{}", shader_id0,
-                    shader_id1, prg->usedPalettes[0], prg->usedPalettes[1], prg->usedTextures[0],
-                    prg->usedTextures[1]);
-    }
 
     return (struct ShaderProgram*)(mShaderProgram = prg);
 }
@@ -572,23 +557,8 @@ void GfxRenderingAPIDX11::UploadTexture(const uint8_t* rgba32_buf, uint32_t widt
     // Create texture
 
     TextureData* texture_data = &mTextures[mCurrentTextureIds[mCurrentTile]];
-    const uint64_t previousGeneration = texture_data->diagnostic_upload_generation;
-    const uint64_t previousHash = texture_data->diagnostic_upload_hash;
-    texture_data->inherited_auto_mipmap_sampler = texture_data->auto_mipmaps;
-    texture_data->reported_nonpoint_index_sampler = false;
-    texture_data->diagnostic_upload_generation++;
-    texture_data->diagnostic_upload_hash = DiagnosticHashBytes(rgba32_buf, static_cast<size_t>(width) * height * 4);
     texture_data->width = width;
     texture_data->height = height;
-
-    if (mCurrentTile < 2 || mCurrentTile == SHADER_PALETTE_TEXTURE) {
-        SPDLOG_INFO(
-            "[D3D-UPLOAD-DIAG] frame={} slot={} texture_id={} generation={} hash={:016x} dimensions={}x{} "
-            "previous_generation={} previous_hash={:016x} inherited_auto_mipmaps={}",
-            mDiagnosticFrameNumber, mCurrentTile, mCurrentTextureIds[mCurrentTile],
-            texture_data->diagnostic_upload_generation, texture_data->diagnostic_upload_hash, width, height,
-            previousGeneration, previousHash, texture_data->inherited_auto_mipmap_sampler);
-    }
 
     D3D11_TEXTURE2D_DESC texture_desc;
     ZeroMemory(&texture_desc, sizeof(D3D11_TEXTURE2D_DESC));
@@ -630,10 +600,6 @@ void GfxRenderingAPIDX11::UploadTextureMip(const uint8_t* rgba32_buf, uint32_t w
     TextureData* texture_data = &mTextures[mCurrentTextureIds[mCurrentTile]];
 
     if (level == 0) {
-        texture_data->diagnostic_upload_generation++;
-        texture_data->diagnostic_upload_hash = 0;
-        texture_data->inherited_auto_mipmap_sampler = false;
-        texture_data->reported_nonpoint_index_sampler = false;
         texture_data->width = width;
         texture_data->height = height;
         texture_data->mip_levels = totalLevels;
@@ -689,7 +655,6 @@ void GfxRenderingAPIDX11::SetSamplerParameters(int tile, bool linear_filter, uin
     sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
 
     texture_data->linear_filtering = linear_filter;
-    texture_data->reported_nonpoint_index_sampler = false;
 
     // This function is called twice per texture, the first one only to set default values.
     // Maybe that could be skipped? Anyway, make sure to release the first default sampler
@@ -753,9 +718,6 @@ void GfxRenderingAPIDX11::SetUseAlpha(bool use_alpha) {
 }
 
 void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
-
-    const bool diagnosticCombinerWasDirty = mCombinerUniformsDirty;
-    const bool diagnosticCustomWasDirty = mCustomUniformsDirty;
 
     if (mLastDepthTest != mCurrentDepthTest || mLastDepthMask != mCurrentDepthMask ||
         mLastStrictDecal != mCurrentStrictDecal || mLastZmodeDecal != mCurrentZmodeDecal) {
@@ -838,167 +800,27 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
             if (mCurrentTextureIds[i] >= mTextures.size()) {
                 continue;
             }
-            TextureData& texture = mTextures[mCurrentTextureIds[i]];
-            if (i < 2 && mShaderProgram->usedPalettes[i] && texture.sampler_state != nullptr &&
-                !texture.reported_nonpoint_index_sampler) {
-                D3D11_SAMPLER_DESC samplerDesc;
-                texture.sampler_state->GetDesc(&samplerDesc);
-                if (samplerDesc.Filter != D3D11_FILTER_MIN_MAG_MIP_POINT) {
-                    SPDLOG_WARN(
-                        "[CI-SAMPLER-DIAG] Non-point sampler bound to palette-index texture: slot={}, texture_id={}, "
-                        "filter={}, inherited_auto_mipmaps={}, requested_linear={}, dimensions={}x{}, mip_levels={}",
-                        i, mCurrentTextureIds[i], static_cast<uint32_t>(samplerDesc.Filter),
-                        texture.inherited_auto_mipmap_sampler, texture.linear_filtering, texture.width, texture.height,
-                        texture.mip_levels);
-                    texture.reported_nonpoint_index_sampler = true;
-                }
-            }
-            if (i < 2 && mShaderProgram->usedPalettes[i]) {
-                const uint32_t paletteId = mCurrentTextureIds[SHADER_PALETTE_TEXTURE];
-                if (paletteId >= mTextures.size()) {
-                    SPDLOG_ERROR(
-                        "[CI-PIPELINE-DIAG] frame={} slot={} invalid palette texture id={} texture_count={}",
-                        mDiagnosticFrameNumber, i, paletteId, mTextures.size());
-                } else {
-                    TextureData& palette = mTextures[paletteId];
-                    const auto bindingKey = std::make_tuple(
-                        mShaderProgram->shader_id0, mShaderProgram->shader_id1, static_cast<uint32_t>(i),
-                        mCurrentTextureIds[i], texture.diagnostic_upload_generation, paletteId,
-                        palette.diagnostic_upload_generation);
-                    if (mDiagnosticIndexedBindings.insert(bindingKey).second) {
-                        D3D11_TEXTURE2D_DESC indexDesc = {};
-                        D3D11_TEXTURE2D_DESC paletteDesc = {};
-                        D3D11_SAMPLER_DESC indexSampler = {};
-                        D3D11_SAMPLER_DESC paletteSampler = {};
-                        if (texture.texture != nullptr) {
-                            texture.texture->GetDesc(&indexDesc);
-                        }
-                        if (palette.texture != nullptr) {
-                            palette.texture->GetDesc(&paletteDesc);
-                        }
-                        if (texture.sampler_state != nullptr) {
-                            texture.sampler_state->GetDesc(&indexSampler);
-                        }
-                        if (palette.sampler_state != nullptr) {
-                            palette.sampler_state->GetDesc(&paletteSampler);
-                        }
-                        SPDLOG_INFO(
-                            "[CI-PIPELINE-DIAG] frame={} shader={:016x}:{:016x} slot={} "
-                            "index={}:{}:{:016x}:{}x{}:fmt{}:filter{}:srv{} "
-                            "palette={}:{}:{:016x}:{}x{}:fmt{}:filter{}:srv{}",
-                            mDiagnosticFrameNumber, mShaderProgram->shader_id0, mShaderProgram->shader_id1, i,
-                            mCurrentTextureIds[i], texture.diagnostic_upload_generation,
-                            texture.diagnostic_upload_hash, indexDesc.Width, indexDesc.Height,
-                            static_cast<uint32_t>(indexDesc.Format), static_cast<uint32_t>(indexSampler.Filter),
-                            static_cast<const void*>(texture.resource_view.Get()), paletteId,
-                            palette.diagnostic_upload_generation, palette.diagnostic_upload_hash, paletteDesc.Width,
-                            paletteDesc.Height, static_cast<uint32_t>(paletteDesc.Format),
-                            static_cast<uint32_t>(paletteSampler.Filter),
-                            static_cast<const void*>(palette.resource_view.Get()));
-                        if (paletteDesc.Width != 256 || paletteDesc.Height != 1 || palette.resource_view == nullptr ||
-                            texture.resource_view == nullptr) {
-                            SPDLOG_ERROR(
-                                "[CI-PIPELINE-DIAG] invalid indexed binding: index_srv={} palette_srv={} "
-                                "palette_dimensions={}x{}",
-                                static_cast<const void*>(texture.resource_view.Get()),
-                                static_cast<const void*>(palette.resource_view.Get()), paletteDesc.Width,
-                                paletteDesc.Height);
-                        }
-                    }
-                }
-            }
-            if (mLastResourceViews[i].Get() != texture.resource_view.Get()) {
-                mLastResourceViews[i] = texture.resource_view.Get();
-                mContext->PSSetShaderResources(i, 1, texture.resource_view.GetAddressOf());
+            if (mLastResourceViews[i].Get() != mTextures[mCurrentTextureIds[i]].resource_view.Get()) {
+                mLastResourceViews[i] = mTextures[mCurrentTextureIds[i]].resource_view.Get();
+                mContext->PSSetShaderResources(i, 1, mTextures[mCurrentTextureIds[i]].resource_view.GetAddressOf());
 
                 if (mCurrentFilterMode == FILTER_THREE_POINT) {
-                    mPerDrawCbData.mTextures[i].width = texture.width;
-                    mPerDrawCbData.mTextures[i].height = texture.height;
-                    mPerDrawCbData.mTextures[i].linear_filtering = texture.linear_filtering;
+                    mPerDrawCbData.mTextures[i].width = mTextures[mCurrentTextureIds[i]].width;
+                    mPerDrawCbData.mTextures[i].height = mTextures[mCurrentTextureIds[i]].height;
+                    mPerDrawCbData.mTextures[i].linear_filtering = mTextures[mCurrentTextureIds[i]].linear_filtering;
                     textures_changed = true;
                 }
 
-                if (mLastSamplerStates[i].Get() != texture.sampler_state.Get()) {
-                    mLastSamplerStates[i] = texture.sampler_state.Get();
+                if (mLastSamplerStates[i].Get() != mTextures[mCurrentTextureIds[i]].sampler_state.Get()) {
+                    mLastSamplerStates[i] = mTextures[mCurrentTextureIds[i]].sampler_state.Get();
                 }
             }
-            mContext->PSSetSamplers(i, 1, texture.sampler_state.GetAddressOf());
-        }
-    }
-
-    bool diagnosticBackdropDraw = false;
-
-    // Paper Boat's map backdrops are 296x200 CI8 images. Log every actual draw
-    // of one (rather than only the first unique binding) so a one-frame palette
-    // or SRV leak can be matched exactly to a captured frame. PSGet* verifies
-    // the state held by the D3D context after our state cache has run.
-    if (mShaderProgram->usedTextures[0] && mShaderProgram->usedPalettes[0] &&
-        mCurrentTextureIds[0] < mTextures.size() && mCurrentTextureIds[SHADER_PALETTE_TEXTURE] < mTextures.size()) {
-        TextureData& indexTexture = mTextures[mCurrentTextureIds[0]];
-        if (indexTexture.width == 296 && indexTexture.height == 200) {
-            diagnosticBackdropDraw = true;
-            TextureData& paletteTexture = mTextures[mCurrentTextureIds[SHADER_PALETTE_TEXTURE]];
-            ID3D11ShaderResourceView* actualIndexSrv = nullptr;
-            ID3D11ShaderResourceView* actualPaletteSrv = nullptr;
-            mContext->PSGetShaderResources(0, 1, &actualIndexSrv);
-            mContext->PSGetShaderResources(SHADER_PALETTE_TEXTURE, 1, &actualPaletteSrv);
-
-            float minX = 0.0f;
-            float maxX = 0.0f;
-            float minY = 0.0f;
-            float maxY = 0.0f;
-            float minU = 0.0f;
-            float maxU = 0.0f;
-            float minV = 0.0f;
-            float maxV = 0.0f;
-            const size_t strideFloats = mShaderProgram->numFloats;
-            const size_t vertexCount = buf_vbo_num_tris * 3;
-            if (strideFloats >= 7 && vertexCount > 0 && buf_vbo_len >= strideFloats) {
-                minX = maxX = buf_vbo[0];
-                minY = maxY = buf_vbo[1];
-                minU = maxU = buf_vbo[5];
-                minV = maxV = buf_vbo[6];
-                for (size_t vertex = 1; vertex < vertexCount; vertex++) {
-                    const size_t base = vertex * strideFloats;
-                    if (base + 6 >= buf_vbo_len) {
-                        break;
-                    }
-                    minX = (std::min)(minX, buf_vbo[base]);
-                    maxX = (std::max)(maxX, buf_vbo[base]);
-                    minY = (std::min)(minY, buf_vbo[base + 1]);
-                    maxY = (std::max)(maxY, buf_vbo[base + 1]);
-                    minU = (std::min)(minU, buf_vbo[base + 5]);
-                    maxU = (std::max)(maxU, buf_vbo[base + 5]);
-                    minV = (std::min)(minV, buf_vbo[base + 6]);
-                    maxV = (std::max)(maxV, buf_vbo[base + 6]);
-                }
-            }
-
-            SPDLOG_INFO(
-                "[CI-BACKGROUND-DRAW-DIAG] frame={} tris={} index={}:{}:{:016x} palette={}:{}:{:016x} "
-                "expected_srvs={},{} cached_srvs={},{} actual_srvs={},{} pos=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] "
-                "uv=[{:.3f},{:.3f}]x[{:.3f},{:.3f}]",
-                mDiagnosticFrameNumber, buf_vbo_num_tris, mCurrentTextureIds[0],
-                indexTexture.diagnostic_upload_generation, indexTexture.diagnostic_upload_hash,
-                mCurrentTextureIds[SHADER_PALETTE_TEXTURE], paletteTexture.diagnostic_upload_generation,
-                paletteTexture.diagnostic_upload_hash, static_cast<const void*>(indexTexture.resource_view.Get()),
-                static_cast<const void*>(paletteTexture.resource_view.Get()),
-                static_cast<const void*>(mLastResourceViews[0].Get()),
-                static_cast<const void*>(mLastResourceViews[SHADER_PALETTE_TEXTURE].Get()),
-                static_cast<const void*>(actualIndexSrv), static_cast<const void*>(actualPaletteSrv), minX, maxX, minY,
-                maxY, minU, maxU, minV, maxV);
-
-            if (actualIndexSrv != nullptr) {
-                actualIndexSrv->Release();
-            }
-            if (actualPaletteSrv != nullptr) {
-                actualPaletteSrv->Release();
-            }
+            mContext->PSSetSamplers(i, 1, mTextures[mCurrentTextureIds[i]].sampler_state.GetAddressOf());
         }
     }
 
     // Set per-draw constant buffer (texture metadata + combiner constants)
-    if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty || diagnosticBackdropDraw) {
+    if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty) {
         memcpy(mPerDrawCbData.combiner_inputs, mCombinerUniforms.inputs, sizeof(mPerDrawCbData.combiner_inputs));
         memcpy(mPerDrawCbData.fog_color, mCombinerUniforms.fog_color, sizeof(mPerDrawCbData.fog_color));
         memcpy(mPerDrawCbData.grayscale_color, mCombinerUniforms.grayscale_color,
@@ -1085,139 +907,7 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         mContext->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
 
-    // A correct backdrop draw was observed immediately before the corrupt
-    // pixels reached the swap chain. Trace every wide CI draw after all state
-    // setup so we can identify either a stale D3D state object or a later draw
-    // that overwrites the backdrop outside the 4:3 story-page area.
-    if ((mShaderProgram->usedPalettes[0] || mShaderProgram->usedPalettes[1]) && buf_vbo_num_tris > 0 &&
-        mShaderProgram->numFloats >= 7 && buf_vbo_len >= mShaderProgram->numFloats) {
-        const size_t strideFloats = mShaderProgram->numFloats;
-        const size_t vertexCount = buf_vbo_num_tris * 3;
-        float minX = buf_vbo[0];
-        float maxX = buf_vbo[0];
-        float minY = buf_vbo[1];
-        float maxY = buf_vbo[1];
-        float minU = buf_vbo[5];
-        float maxU = buf_vbo[5];
-        float minV = buf_vbo[6];
-        float maxV = buf_vbo[6];
-        for (size_t vertex = 1; vertex < vertexCount; vertex++) {
-            const size_t base = vertex * strideFloats;
-            if (base + 6 >= buf_vbo_len) {
-                break;
-            }
-            minX = (std::min)(minX, buf_vbo[base]);
-            maxX = (std::max)(maxX, buf_vbo[base]);
-            minY = (std::min)(minY, buf_vbo[base + 1]);
-            maxY = (std::max)(maxY, buf_vbo[base + 1]);
-            minU = (std::min)(minU, buf_vbo[base + 5]);
-            maxU = (std::max)(maxU, buf_vbo[base + 5]);
-            minV = (std::min)(minV, buf_vbo[base + 6]);
-            maxV = (std::max)(maxV, buf_vbo[base + 6]);
-        }
-
-        if (minX < -1.05f || maxX > 1.05f) {
-            ID3D11VertexShader* actualVertexShader = nullptr;
-            ID3D11PixelShader* actualPixelShader = nullptr;
-            ID3D11Buffer* actualPixelDrawCb = nullptr;
-            ID3D11Buffer* actualVertexDrawCb = nullptr;
-            ID3D11InputLayout* actualInputLayout = nullptr;
-            ID3D11BlendState* actualBlendState = nullptr;
-            ID3D11DepthStencilState* actualDepthState = nullptr;
-            ID3D11RasterizerState* actualRasterizerState = nullptr;
-            ID3D11RenderTargetView* actualRenderTarget = nullptr;
-            ID3D11DepthStencilView* actualDepthTarget = nullptr;
-            FLOAT blendFactor[4] = {};
-            UINT sampleMask = 0;
-            UINT stencilRef = 0;
-            UINT scissorCount = 1;
-            UINT viewportCount = 1;
-            D3D11_RECT scissor = {};
-            D3D11_VIEWPORT viewport = {};
-            D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-
-            mContext->VSGetShader(&actualVertexShader, nullptr, nullptr);
-            mContext->PSGetShader(&actualPixelShader, nullptr, nullptr);
-            mContext->PSGetConstantBuffers(1, 1, &actualPixelDrawCb);
-            mContext->VSGetConstantBuffers(1, 1, &actualVertexDrawCb);
-            mContext->IAGetInputLayout(&actualInputLayout);
-            mContext->IAGetPrimitiveTopology(&topology);
-            mContext->OMGetBlendState(&actualBlendState, blendFactor, &sampleMask);
-            mContext->OMGetDepthStencilState(&actualDepthState, &stencilRef);
-            mContext->RSGetState(&actualRasterizerState);
-            mContext->RSGetScissorRects(&scissorCount, &scissor);
-            mContext->RSGetViewports(&viewportCount, &viewport);
-            mContext->OMGetRenderTargets(1, &actualRenderTarget, &actualDepthTarget);
-
-            const uint32_t texture0Id = mCurrentTextureIds[0];
-            const uint32_t texture1Id = mCurrentTextureIds[1];
-            const uint32_t paletteId = mCurrentTextureIds[SHADER_PALETTE_TEXTURE];
-            const uint64_t vertexHash = DiagnosticHashBytes(reinterpret_cast<const uint8_t*>(buf_vbo),
-                                                            buf_vbo_len * sizeof(float));
-            const uint64_t drawUniformHash = DiagnosticHashBytes(reinterpret_cast<const uint8_t*>(&mPerDrawCbData),
-                                                                 sizeof(mPerDrawCbData));
-            SPDLOG_INFO(
-                "[CI-WIDE-DRAW-DIAG] frame={} tris={} shader={:016x}:{:016x} textures={},{},{} "
-                "shader_state=vs{}:ps{}:layout{} cb=ps{}:vs{} pipeline=blend{}:depth{}:raster{}:topology{} "
-                "dirty=combiner{}:custom{} vertex_hash={:016x} draw_cb_hash={:016x} "
-                "palette0=[{:.3f},{:.3f},{:.3f},{:.3f}] uv0=[{:.3f},{:.3f},{:.3f},{:.3f}] "
-                "pos=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] texcoord=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] "
-                "scissor={},{},{},{} viewport=[{:.1f},{:.1f},{:.1f},{:.1f}] rt={}:{}",
-                mDiagnosticFrameNumber, buf_vbo_num_tris, mShaderProgram->shader_id0, mShaderProgram->shader_id1,
-                texture0Id, texture1Id, paletteId, actualVertexShader == mShaderProgram->vertex_shader.Get(),
-                actualPixelShader == mShaderProgram->pixel_shader.Get(),
-                actualInputLayout == mShaderProgram->input_layout.Get(), actualPixelDrawCb == mPerDrawCb.Get(),
-                actualVertexDrawCb == mPerDrawCb.Get(), actualBlendState == mShaderProgram->blend_state.Get(),
-                actualDepthState == mDepthStencilState.Get(), actualRasterizerState == mRasterizerState.Get(),
-                topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, diagnosticCombinerWasDirty,
-                diagnosticCustomWasDirty, vertexHash, drawUniformHash, mPerDrawCbData.palette_params[0][0],
-                mPerDrawCbData.palette_params[0][1], mPerDrawCbData.palette_params[0][2],
-                mPerDrawCbData.palette_params[0][3], mPerDrawCbData.uv_transform[0][0],
-                mPerDrawCbData.uv_transform[0][1], mPerDrawCbData.uv_transform[0][2],
-                mPerDrawCbData.uv_transform[0][3], minX, maxX, minY, maxY, minU, maxU, minV, maxV,
-                scissor.left, scissor.top, scissor.right, scissor.bottom, viewport.TopLeftX, viewport.TopLeftY,
-                viewport.Width, viewport.Height, static_cast<const void*>(actualRenderTarget),
-                static_cast<const void*>(actualDepthTarget));
-
-            if (actualVertexShader != nullptr) {
-                actualVertexShader->Release();
-            }
-            if (actualPixelShader != nullptr) {
-                actualPixelShader->Release();
-            }
-            if (actualPixelDrawCb != nullptr) {
-                actualPixelDrawCb->Release();
-            }
-            if (actualVertexDrawCb != nullptr) {
-                actualVertexDrawCb->Release();
-            }
-            if (actualInputLayout != nullptr) {
-                actualInputLayout->Release();
-            }
-            if (actualBlendState != nullptr) {
-                actualBlendState->Release();
-            }
-            if (actualDepthState != nullptr) {
-                actualDepthState->Release();
-            }
-            if (actualRasterizerState != nullptr) {
-                actualRasterizerState->Release();
-            }
-            if (actualRenderTarget != nullptr) {
-                actualRenderTarget->Release();
-            }
-            if (actualDepthTarget != nullptr) {
-                actualDepthTarget->Release();
-            }
-        }
-    }
-
     mContext->Draw(buf_vbo_num_tris * 3, 0);
-
-    // Restore the real per-draw tint before the next draw.
-    if (diagnosticBackdropDraw) {
-        mCombinerUniformsDirty = true;
-    }
 }
 
 void GfxRenderingAPIDX11::OnResize() {
@@ -1225,7 +915,6 @@ void GfxRenderingAPIDX11::OnResize() {
 }
 
 void GfxRenderingAPIDX11::StartFrame() {
-    mDiagnosticFrameNumber++;
     // Set per-frame constant buffer
     ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };
     mContext->PSSetConstantBuffers(0, 3, buffers);

@@ -5,9 +5,7 @@
 #ifdef __cplusplus
 #include "../interpreter.h"
 #include <cstdint>
-#include <set>
 #include <string>
-#include <tuple>
 #include "gfx_rendering_api.h"
 #include "d3d11.h"
 #include "d3dcompiler.h"
@@ -61,12 +59,6 @@ struct TextureData {
     uint32_t mip_levels;
     bool linear_filtering;
     bool auto_mipmaps;
-    // Diagnostic state for detecting a recycled auto-mipmap sampler on a
-    // single-level palette-index texture. These fields do not affect rendering.
-    bool inherited_auto_mipmap_sampler;
-    bool reported_nonpoint_index_sampler;
-    uint64_t diagnostic_upload_hash = 0;
-    uint64_t diagnostic_upload_generation = 0;
 };
 
 struct FramebufferDX11 {
@@ -89,7 +81,6 @@ struct ShaderProgramD3D11 {
     uint8_t numInputs;
     uint8_t numFloats;
     bool usedTextures[SHADER_MAX_TEXTURES];
-    bool usedPalettes[2];
 };
 
 class GfxWindowBackendDXGI;
@@ -221,10 +212,6 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> mReadbackStaging;
     uint32_t mReadbackStagingW = 0;
     uint32_t mReadbackStagingH = 0;
-
-    uint64_t mDiagnosticFrameNumber = 0;
-    std::set<std::tuple<uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t>>
-        mDiagnosticIndexedBindings;
 };
 
 std::string gfx_direct3d_common_build_shader(size_t& numFloats, const CCFeatures& cc_features,

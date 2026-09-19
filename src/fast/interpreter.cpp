@@ -756,8 +756,6 @@ uint32_t Interpreter::AcquirePaletteTexture() {
     mRapi->SelectTexture(SHADER_PALETTE_TEXTURE, mPaletteRingTexture[slot]);
     mRapi->UploadTexture(palBuf, 256, 1);
     mRapi->SetSamplerParameters(SHADER_PALETTE_TEXTURE, false, G_TX_CLAMP, G_TX_CLAMP);
-    SPDLOG_INFO("[CI-PALETTE-DIAG] frame={} action=upload slot={} texture_id={} tlut_hash={:016x}",
-                mCustomFrameCount, slot, mPaletteRingTexture[slot], mCurrentPaletteHash);
     return mPaletteRingTexture[slot];
 }
 
@@ -2458,19 +2456,7 @@ void Interpreter::ImportTexture(int i, int tile, bool importReplacement) {
         return;
     }
 
-    const bool cacheHit = TextureCacheLookup(i, key);
-    if (mImportIndexed && !cacheHit) {
-        const auto* textureNode = mRenderingState.mTextures[i];
-        const uint32_t textureId = textureNode != nullptr ? textureNode->second.texture_id : 0xFFFFFFFF;
-        const std::string resourcePath =
-            metadata->resource != nullptr ? metadata->resource->GetInitData()->Path : "<ram>";
-        SPDLOG_INFO(
-            "[CI-CACHE-DIAG] frame={} action={} slot={} tile={} texture_id={} fmt={} siz={} size_bytes={} "
-            "texture_addr={} tlut_hash={:016x} resource={}",
-            mCustomFrameCount, "miss", i, tile, textureId, fmt, siz, origSizeBytes,
-            static_cast<const void*>(origAddr), HashTlutContent(mRdp), resourcePath);
-    }
-    if (cacheHit) {
+    if (TextureCacheLookup(i, key)) {
         return;
     }
 
@@ -3304,10 +3290,6 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         if (palTexture != mBoundPaletteTexture) {
             Flush();
             mBoundPaletteTexture = palTexture;
-            if (mDiagnosticPaletteBindings.emplace(palTexture, mCurrentPaletteHash).second) {
-                SPDLOG_INFO("[CI-PALETTE-DIAG] frame={} action=bind texture_id={} tlut_hash={:016x} slots={},{}",
-                            mCustomFrameCount, palTexture, mCurrentPaletteHash, palettized[0], palettized[1]);
-            }
         }
         mRapi->SelectTexture(SHADER_PALETTE_TEXTURE, palTexture);
     }

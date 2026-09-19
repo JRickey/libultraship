@@ -1010,12 +1010,12 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         memcpy(mPerDrawCbData.lod_params, mCombinerUniforms.lod_params, sizeof(mPerDrawCbData.lod_params));
         memcpy(mPerDrawCbData.debug_tint, mCombinerUniforms.debug_tint, sizeof(mPerDrawCbData.debug_tint));
         if (diagnosticBackdropDraw) {
-            // Diagnostic build only: bypass texture/palette sampling in the
-            // final output while preserving this draw's geometry and state.
+            // Diagnostic build only: request raw CI index visualization while
+            // preserving this draw's geometry and state.
             mPerDrawCbData.debug_tint[0] = 1.0f;
             mPerDrawCbData.debug_tint[1] = 0.0f;
             mPerDrawCbData.debug_tint[2] = 1.0f;
-            mPerDrawCbData.debug_tint[3] = 1.0f;
+            mPerDrawCbData.debug_tint[3] = 2.0f;
         }
         memcpy(mPerDrawCbData.uCustom, mCustomUniforms.regs, sizeof(mPerDrawCbData.uCustom));
         D3D11_MAPPED_SUBRESOURCE ms;

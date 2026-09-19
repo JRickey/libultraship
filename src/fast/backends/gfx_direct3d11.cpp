@@ -926,17 +926,6 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         }
     }
 
-    // Diagnostic ownership test: suppress only Paper Boat's 296x200 CI8
-    // backdrop. If the corrupt widescreen gutters remain, a later draw owns
-    // them; if they clear, the backdrop draw itself is producing the pixels.
-    if (mShaderProgram->usedTextures[0] && mShaderProgram->usedPalettes[0] &&
-        mCurrentTextureIds[0] < mTextures.size()) {
-        const TextureData& diagnosticTexture = mTextures[mCurrentTextureIds[0]];
-        if (diagnosticTexture.width == 296 && diagnosticTexture.height == 200) {
-            return;
-        }
-    }
-
     // Paper Boat's map backdrops are 296x200 CI8 images. Log every actual draw
     // of one (rather than only the first unique binding) so a one-frame palette
     // or SRV leak can be matched exactly to a captured frame. PSGet* verifies

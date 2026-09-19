@@ -754,6 +754,9 @@ void GfxRenderingAPIDX11::SetUseAlpha(bool use_alpha) {
 
 void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
 
+    const bool diagnosticCombinerWasDirty = mCombinerUniformsDirty;
+    const bool diagnosticCustomWasDirty = mCustomUniformsDirty;
+
     if (mLastDepthTest != mCurrentDepthTest || mLastDepthMask != mCurrentDepthMask ||
         mLastStrictDecal != mCurrentStrictDecal || mLastZmodeDecal != mCurrentZmodeDecal) {
         mLastDepthTest = mCurrentDepthTest;
@@ -1077,6 +1080,133 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
     if (mLastPrimitaveTopology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
         mLastPrimitaveTopology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
         mContext->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    }
+
+    // A correct backdrop draw was observed immediately before the corrupt
+    // pixels reached the swap chain. Trace every wide CI draw after all state
+    // setup so we can identify either a stale D3D state object or a later draw
+    // that overwrites the backdrop outside the 4:3 story-page area.
+    if ((mShaderProgram->usedPalettes[0] || mShaderProgram->usedPalettes[1]) && buf_vbo_num_tris > 0 &&
+        mShaderProgram->numFloats >= 7 && buf_vbo_len >= mShaderProgram->numFloats) {
+        const size_t strideFloats = mShaderProgram->numFloats;
+        const size_t vertexCount = buf_vbo_num_tris * 3;
+        float minX = buf_vbo[0];
+        float maxX = buf_vbo[0];
+        float minY = buf_vbo[1];
+        float maxY = buf_vbo[1];
+        float minU = buf_vbo[5];
+        float maxU = buf_vbo[5];
+        float minV = buf_vbo[6];
+        float maxV = buf_vbo[6];
+        for (size_t vertex = 1; vertex < vertexCount; vertex++) {
+            const size_t base = vertex * strideFloats;
+            if (base + 6 >= buf_vbo_len) {
+                break;
+            }
+            minX = (std::min)(minX, buf_vbo[base]);
+            maxX = (std::max)(maxX, buf_vbo[base]);
+            minY = (std::min)(minY, buf_vbo[base + 1]);
+            maxY = (std::max)(maxY, buf_vbo[base + 1]);
+            minU = (std::min)(minU, buf_vbo[base + 5]);
+            maxU = (std::max)(maxU, buf_vbo[base + 5]);
+            minV = (std::min)(minV, buf_vbo[base + 6]);
+            maxV = (std::max)(maxV, buf_vbo[base + 6]);
+        }
+
+        if (minX < -1.05f || maxX > 1.05f) {
+            ID3D11VertexShader* actualVertexShader = nullptr;
+            ID3D11PixelShader* actualPixelShader = nullptr;
+            ID3D11Buffer* actualPixelDrawCb = nullptr;
+            ID3D11Buffer* actualVertexDrawCb = nullptr;
+            ID3D11InputLayout* actualInputLayout = nullptr;
+            ID3D11BlendState* actualBlendState = nullptr;
+            ID3D11DepthStencilState* actualDepthState = nullptr;
+            ID3D11RasterizerState* actualRasterizerState = nullptr;
+            ID3D11RenderTargetView* actualRenderTarget = nullptr;
+            ID3D11DepthStencilView* actualDepthTarget = nullptr;
+            FLOAT blendFactor[4] = {};
+            UINT sampleMask = 0;
+            UINT stencilRef = 0;
+            UINT scissorCount = 1;
+            UINT viewportCount = 1;
+            D3D11_RECT scissor = {};
+            D3D11_VIEWPORT viewport = {};
+            D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+
+            mContext->VSGetShader(&actualVertexShader, nullptr, nullptr);
+            mContext->PSGetShader(&actualPixelShader, nullptr, nullptr);
+            mContext->PSGetConstantBuffers(1, 1, &actualPixelDrawCb);
+            mContext->VSGetConstantBuffers(1, 1, &actualVertexDrawCb);
+            mContext->IAGetInputLayout(&actualInputLayout);
+            mContext->IAGetPrimitiveTopology(&topology);
+            mContext->OMGetBlendState(&actualBlendState, blendFactor, &sampleMask);
+            mContext->OMGetDepthStencilState(&actualDepthState, &stencilRef);
+            mContext->RSGetState(&actualRasterizerState);
+            mContext->RSGetScissorRects(&scissorCount, &scissor);
+            mContext->RSGetViewports(&viewportCount, &viewport);
+            mContext->OMGetRenderTargets(1, &actualRenderTarget, &actualDepthTarget);
+
+            const uint32_t texture0Id = mCurrentTextureIds[0];
+            const uint32_t texture1Id = mCurrentTextureIds[1];
+            const uint32_t paletteId = mCurrentTextureIds[SHADER_PALETTE_TEXTURE];
+            const uint64_t vertexHash = DiagnosticHashBytes(reinterpret_cast<const uint8_t*>(buf_vbo),
+                                                            buf_vbo_len * sizeof(float));
+            const uint64_t drawUniformHash = DiagnosticHashBytes(reinterpret_cast<const uint8_t*>(&mPerDrawCbData),
+                                                                 sizeof(mPerDrawCbData));
+            SPDLOG_INFO(
+                "[CI-WIDE-DRAW-DIAG] frame={} tris={} shader={:016x}:{:016x} textures={},{},{} "
+                "shader_state=vs{}:ps{}:layout{} cb=ps{}:vs{} pipeline=blend{}:depth{}:raster{}:topology{} "
+                "dirty=combiner{}:custom{} vertex_hash={:016x} draw_cb_hash={:016x} "
+                "palette0=[{:.3f},{:.3f},{:.3f},{:.3f}] uv0=[{:.3f},{:.3f},{:.3f},{:.3f}] "
+                "pos=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] texcoord=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] "
+                "scissor={},{},{},{} viewport=[{:.1f},{:.1f},{:.1f},{:.1f}] rt={}:{}",
+                mDiagnosticFrameNumber, buf_vbo_num_tris, mShaderProgram->shader_id0, mShaderProgram->shader_id1,
+                texture0Id, texture1Id, paletteId, actualVertexShader == mShaderProgram->vertex_shader.Get(),
+                actualPixelShader == mShaderProgram->pixel_shader.Get(),
+                actualInputLayout == mShaderProgram->input_layout.Get(), actualPixelDrawCb == mPerDrawCb.Get(),
+                actualVertexDrawCb == mPerDrawCb.Get(), actualBlendState == mShaderProgram->blend_state.Get(),
+                actualDepthState == mDepthStencilState.Get(), actualRasterizerState == mRasterizerState.Get(),
+                topology == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, diagnosticCombinerWasDirty,
+                diagnosticCustomWasDirty, vertexHash, drawUniformHash, mPerDrawCbData.palette_params[0][0],
+                mPerDrawCbData.palette_params[0][1], mPerDrawCbData.palette_params[0][2],
+                mPerDrawCbData.palette_params[0][3], mPerDrawCbData.uv_transform[0][0],
+                mPerDrawCbData.uv_transform[0][1], mPerDrawCbData.uv_transform[0][2],
+                mPerDrawCbData.uv_transform[0][3], minX, maxX, minY, maxY, minU, maxU, minV, maxV,
+                scissor.left, scissor.top, scissor.right, scissor.bottom, viewport.TopLeftX, viewport.TopLeftY,
+                viewport.Width, viewport.Height, static_cast<const void*>(actualRenderTarget),
+                static_cast<const void*>(actualDepthTarget));
+
+            if (actualVertexShader != nullptr) {
+                actualVertexShader->Release();
+            }
+            if (actualPixelShader != nullptr) {
+                actualPixelShader->Release();
+            }
+            if (actualPixelDrawCb != nullptr) {
+                actualPixelDrawCb->Release();
+            }
+            if (actualVertexDrawCb != nullptr) {
+                actualVertexDrawCb->Release();
+            }
+            if (actualInputLayout != nullptr) {
+                actualInputLayout->Release();
+            }
+            if (actualBlendState != nullptr) {
+                actualBlendState->Release();
+            }
+            if (actualDepthState != nullptr) {
+                actualDepthState->Release();
+            }
+            if (actualRasterizerState != nullptr) {
+                actualRasterizerState->Release();
+            }
+            if (actualRenderTarget != nullptr) {
+                actualRenderTarget->Release();
+            }
+            if (actualDepthTarget != nullptr) {
+                actualDepthTarget->Release();
+            }
+        }
     }
 
     mContext->Draw(buf_vbo_num_tris * 3, 0);

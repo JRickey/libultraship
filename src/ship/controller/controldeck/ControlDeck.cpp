@@ -4,6 +4,8 @@
 #include "ship/controller/controldevice/controller/Controller.h"
 #include "ship/controller/controldevice/controller/mapping/raphnet/RaphnetRumbleMapping.h"
 #include "ship/controller/raphnet/RaphnetPhysicalDeviceManager.h"
+#include "ship/controller/gcadapter/GCAdapter.h"
+#include "ship/controller/controldevice/controller/mapping/gcadapter/GCAdapterRumbleMapping.h"
 #include "ship/utils/StringHelper.h"
 #include "ship/config/ConsoleVariable.h"
 #include <imgui.h>
@@ -78,6 +80,37 @@ void ControlDeck::ShutdownRaphnet() {
     mRaphnetPhysicalDeviceManager.reset();
 }
 
+void ControlDeck::PreInitGCAdapter() {
+    if (mGCAdapter != nullptr) {
+        return;
+    }
+    if (Ship::Context::GetInstance()->GetConsoleVariables()->GetInteger(CVAR_PREFIX_CONTROLLERS ".GCAdapter.Enabled",
+                                                                        1) == 0) {
+        SPDLOG_INFO("ControlDeck::PreInitGCAdapter: gControllers.GCAdapter.Enabled=0; native GC adapter disabled");
+        return;
+    }
+    auto adapter = std::make_shared<GCAdapter>();
+    if (!adapter->Start()) {
+        return;
+    }
+    mGCAdapter = std::move(adapter);
+    // On macOS/Windows the adapter can also surface as a plain HID joystick;
+    // keep SDL from opening it so it doesn't fight libusb for the interface.
+    mConnectedPhysicalDeviceManager->IgnoreDeviceGlobally(gGCAdapterVid, gGCAdapterPid);
+}
+
+void ControlDeck::ShutdownGCAdapter() {
+    if (mGCAdapter == nullptr) {
+        return;
+    }
+    mGCAdapter->Stop();
+    mGCAdapter.reset();
+}
+
+std::shared_ptr<GCAdapter> ControlDeck::GetGCAdapter() {
+    return mGCAdapter;
+}
+
 void ControlDeck::Init(uint8_t* controllerBits) {
     mControllerBits = controllerBits;
     *mControllerBits |= 1 << 0;
@@ -104,6 +137,39 @@ void ControlDeck::Init(uint8_t* controllerBits) {
     for (size_t i = 1; i < mPorts.size(); i++) {
         if (!mPorts[i]->GetConnectedController()->HasConfig()) {
             mPorts[i]->GetConnectedController()->AddDefaultMappings(PhysicalDeviceType::SDLGamepad);
+        }
+    }
+
+    // Native GameCube adapter: restore each game port's adapter routing, seed
+    // the default GC mappings once per port (so an existing config gets them
+    // without a manual "Set Defaults"), and install the rumble mapping.
+    if (mGCAdapter != nullptr) {
+        auto cvars = Ship::Context::GetInstance()->GetConsoleVariables();
+        for (size_t i = 0; i < mPorts.size() && i < gGCAdapterPorts; ++i) {
+            const uint8_t port = static_cast<uint8_t>(i);
+            auto controller = mPorts[i]->GetConnectedController();
+            if (controller == nullptr) {
+                continue;
+            }
+            mGCAdapter->SetPortRouting(
+                port,
+                static_cast<uint8_t>(cvars->GetInteger(
+                    StringHelper::Sprintf(CVAR_PREFIX_CONTROLLERS ".Port%d.GCAdapter.AdapterPorts", port + 1).c_str(),
+                    1 << port)));
+
+            const std::string appliedKey =
+                StringHelper::Sprintf(CVAR_PREFIX_CONTROLLERS ".Port%d.GCAdapter.DefaultsApplied", port + 1);
+            if (cvars->GetInteger(appliedKey.c_str(), 0) == 0) {
+                controller->AddDefaultMappings(PhysicalDeviceType::GameCubeAdapter);
+                cvars->SetInteger(appliedKey.c_str(), 1);
+                cvars->Save();
+            }
+
+            if (auto rumble = controller->GetRumble()) {
+                rumble->AddRumbleMapping(std::make_shared<GCAdapterRumbleMapping>(
+                    port, DEFAULT_LOW_FREQUENCY_RUMBLE_PERCENTAGE, DEFAULT_HIGH_FREQUENCY_RUMBLE_PERCENTAGE,
+                    std::weak_ptr<GCAdapter>(mGCAdapter), port));
+            }
         }
     }
 

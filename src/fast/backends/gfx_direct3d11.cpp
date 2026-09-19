@@ -996,8 +996,23 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         }
     }
 
+    // Diagnostic draw ownership tags for CI textures. The 296x200 backdrop is
+    // red, the 32x16 theater floor is green, and every other indexed draw is
+    // blue. A corrupt gutter therefore reveals which submitted draw owns it.
+    int diagnosticIndexedDrawTag = 0;
+    if (mShaderProgram->usedPalettes[0] && mCurrentTextureIds[0] < mTextures.size()) {
+        const TextureData& diagnosticTexture = mTextures[mCurrentTextureIds[0]];
+        if (diagnosticTexture.width == 296 && diagnosticTexture.height == 200) {
+            diagnosticIndexedDrawTag = 1;
+        } else if (diagnosticTexture.width == 32 && diagnosticTexture.height == 16) {
+            diagnosticIndexedDrawTag = 2;
+        } else {
+            diagnosticIndexedDrawTag = 3;
+        }
+    }
+
     // Set per-draw constant buffer (texture metadata + combiner constants)
-    if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty) {
+    if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty || diagnosticIndexedDrawTag != 0) {
         memcpy(mPerDrawCbData.combiner_inputs, mCombinerUniforms.inputs, sizeof(mPerDrawCbData.combiner_inputs));
         memcpy(mPerDrawCbData.fog_color, mCombinerUniforms.fog_color, sizeof(mPerDrawCbData.fog_color));
         memcpy(mPerDrawCbData.grayscale_color, mCombinerUniforms.grayscale_color,
@@ -1009,6 +1024,12 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         memcpy(mPerDrawCbData.lod_params, mCombinerUniforms.lod_params, sizeof(mPerDrawCbData.lod_params));
         memcpy(mPerDrawCbData.debug_tint, mCombinerUniforms.debug_tint, sizeof(mPerDrawCbData.debug_tint));
         memcpy(mPerDrawCbData.uCustom, mCustomUniforms.regs, sizeof(mPerDrawCbData.uCustom));
+        if (diagnosticIndexedDrawTag != 0) {
+            mPerDrawCbData.debug_tint[0] = diagnosticIndexedDrawTag == 1 ? 1.0f : 0.0f;
+            mPerDrawCbData.debug_tint[1] = diagnosticIndexedDrawTag == 2 ? 1.0f : 0.0f;
+            mPerDrawCbData.debug_tint[2] = diagnosticIndexedDrawTag == 3 ? 1.0f : 0.0f;
+            mPerDrawCbData.debug_tint[3] = 0.80f;
+        }
 
         // Give every per-draw update in a frame its own buffer object. This
         // diagnostic path isolates the submitted draws from one another and

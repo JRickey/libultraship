@@ -50,6 +50,14 @@ using namespace Microsoft::WRL; // For ComPtr
 
 namespace Fast {
 
+static uint64_t DiagnosticHashBytes(const uint8_t* data, size_t size) {
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < size; i++) {
+        hash = (hash ^ data[i]) * 1099511628211ull;
+    }
+    return hash;
+}
+
 GfxRenderingAPIDX11::~GfxRenderingAPIDX11() {
 }
 
@@ -512,6 +520,11 @@ struct ShaderProgram* GfxRenderingAPIDX11::CreateAndLoadNewShader(uint64_t shade
     prg->usedTextures[5] = cc_features.used_blend[1];
     prg->usedPalettes[0] = cc_features.used_palette[0];
     prg->usedPalettes[1] = cc_features.used_palette[1];
+    if (prg->usedPalettes[0] || prg->usedPalettes[1]) {
+        SPDLOG_INFO("[CI-SHADER-DIAG] shader={:016x}:{:016x} palette_slots={},{} texture_slots={},{}", shader_id0,
+                    shader_id1, prg->usedPalettes[0], prg->usedPalettes[1], prg->usedTextures[0],
+                    prg->usedTextures[1]);
+    }
 
     return (struct ShaderProgram*)(mShaderProgram = prg);
 }
@@ -559,10 +572,23 @@ void GfxRenderingAPIDX11::UploadTexture(const uint8_t* rgba32_buf, uint32_t widt
     // Create texture
 
     TextureData* texture_data = &mTextures[mCurrentTextureIds[mCurrentTile]];
+    const uint64_t previousGeneration = texture_data->diagnostic_upload_generation;
+    const uint64_t previousHash = texture_data->diagnostic_upload_hash;
     texture_data->inherited_auto_mipmap_sampler = texture_data->auto_mipmaps;
     texture_data->reported_nonpoint_index_sampler = false;
+    texture_data->diagnostic_upload_generation++;
+    texture_data->diagnostic_upload_hash = DiagnosticHashBytes(rgba32_buf, static_cast<size_t>(width) * height * 4);
     texture_data->width = width;
     texture_data->height = height;
+
+    if (mCurrentTile < 2 || mCurrentTile == SHADER_PALETTE_TEXTURE) {
+        SPDLOG_INFO(
+            "[D3D-UPLOAD-DIAG] frame={} slot={} texture_id={} generation={} hash={:016x} dimensions={}x{} "
+            "previous_generation={} previous_hash={:016x} inherited_auto_mipmaps={}",
+            mDiagnosticFrameNumber, mCurrentTile, mCurrentTextureIds[mCurrentTile],
+            texture_data->diagnostic_upload_generation, texture_data->diagnostic_upload_hash, width, height,
+            previousGeneration, previousHash, texture_data->inherited_auto_mipmap_sampler);
+    }
 
     D3D11_TEXTURE2D_DESC texture_desc;
     ZeroMemory(&texture_desc, sizeof(D3D11_TEXTURE2D_DESC));
@@ -604,6 +630,8 @@ void GfxRenderingAPIDX11::UploadTextureMip(const uint8_t* rgba32_buf, uint32_t w
     TextureData* texture_data = &mTextures[mCurrentTextureIds[mCurrentTile]];
 
     if (level == 0) {
+        texture_data->diagnostic_upload_generation++;
+        texture_data->diagnostic_upload_hash = 0;
         texture_data->inherited_auto_mipmap_sampler = false;
         texture_data->reported_nonpoint_index_sampler = false;
         texture_data->width = width;
@@ -822,6 +850,60 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
                     texture.reported_nonpoint_index_sampler = true;
                 }
             }
+            if (i < 2 && mShaderProgram->usedPalettes[i]) {
+                const uint32_t paletteId = mCurrentTextureIds[SHADER_PALETTE_TEXTURE];
+                if (paletteId >= mTextures.size()) {
+                    SPDLOG_ERROR(
+                        "[CI-PIPELINE-DIAG] frame={} slot={} invalid palette texture id={} texture_count={}",
+                        mDiagnosticFrameNumber, i, paletteId, mTextures.size());
+                } else {
+                    TextureData& palette = mTextures[paletteId];
+                    const auto bindingKey = std::make_tuple(
+                        mShaderProgram->shader_id0, mShaderProgram->shader_id1, static_cast<uint32_t>(i),
+                        mCurrentTextureIds[i], texture.diagnostic_upload_generation, paletteId,
+                        palette.diagnostic_upload_generation);
+                    if (mDiagnosticIndexedBindings.insert(bindingKey).second) {
+                        D3D11_TEXTURE2D_DESC indexDesc = {};
+                        D3D11_TEXTURE2D_DESC paletteDesc = {};
+                        D3D11_SAMPLER_DESC indexSampler = {};
+                        D3D11_SAMPLER_DESC paletteSampler = {};
+                        if (texture.texture != nullptr) {
+                            texture.texture->GetDesc(&indexDesc);
+                        }
+                        if (palette.texture != nullptr) {
+                            palette.texture->GetDesc(&paletteDesc);
+                        }
+                        if (texture.sampler_state != nullptr) {
+                            texture.sampler_state->GetDesc(&indexSampler);
+                        }
+                        if (palette.sampler_state != nullptr) {
+                            palette.sampler_state->GetDesc(&paletteSampler);
+                        }
+                        SPDLOG_INFO(
+                            "[CI-PIPELINE-DIAG] frame={} shader={:016x}:{:016x} slot={} "
+                            "index={}:{}:{:016x}:{}x{}:fmt{}:filter{}:srv{} "
+                            "palette={}:{}:{:016x}:{}x{}:fmt{}:filter{}:srv{}",
+                            mDiagnosticFrameNumber, mShaderProgram->shader_id0, mShaderProgram->shader_id1, i,
+                            mCurrentTextureIds[i], texture.diagnostic_upload_generation,
+                            texture.diagnostic_upload_hash, indexDesc.Width, indexDesc.Height,
+                            static_cast<uint32_t>(indexDesc.Format), static_cast<uint32_t>(indexSampler.Filter),
+                            static_cast<const void*>(texture.resource_view.Get()), paletteId,
+                            palette.diagnostic_upload_generation, palette.diagnostic_upload_hash, paletteDesc.Width,
+                            paletteDesc.Height, static_cast<uint32_t>(paletteDesc.Format),
+                            static_cast<uint32_t>(paletteSampler.Filter),
+                            static_cast<const void*>(palette.resource_view.Get()));
+                        if (paletteDesc.Width != 256 || paletteDesc.Height != 1 || palette.resource_view == nullptr ||
+                            texture.resource_view == nullptr) {
+                            SPDLOG_ERROR(
+                                "[CI-PIPELINE-DIAG] invalid indexed binding: index_srv={} palette_srv={} "
+                                "palette_dimensions={}x{}",
+                                static_cast<const void*>(texture.resource_view.Get()),
+                                static_cast<const void*>(palette.resource_view.Get()), paletteDesc.Width,
+                                paletteDesc.Height);
+                        }
+                    }
+                }
+            }
             if (mLastResourceViews[i].Get() != texture.resource_view.Get()) {
                 mLastResourceViews[i] = texture.resource_view.Get();
                 mContext->PSSetShaderResources(i, 1, texture.resource_view.GetAddressOf());
@@ -937,6 +1019,7 @@ void GfxRenderingAPIDX11::OnResize() {
 }
 
 void GfxRenderingAPIDX11::StartFrame() {
+    mDiagnosticFrameNumber++;
     // Set per-frame constant buffer
     ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };
     mContext->PSSetConstantBuffers(0, 3, buffers);

@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <set>
 #include <future>
 #include <chrono>
 #include <unordered_set>
@@ -711,6 +712,7 @@ class Interpreter {
     std::unordered_map<uint64_t, size_t> mPaletteSlotByHash;
     uint64_t mCurrentPaletteHash = 0;
     uint32_t mBoundPaletteTexture = 0xFFFFFFFF;
+    std::set<std::pair<uint32_t, uint64_t>> mDiagnosticPaletteBindings;
     // Returns the texture id for the current TLUT content, uploading it if new
     uint32_t AcquirePaletteTexture();
     // Per-draw palette parameters: x = palette bank entry offset, y = filter mode

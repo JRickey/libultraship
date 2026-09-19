@@ -169,8 +169,6 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     Microsoft::WRL::ComPtr<ID3D11Buffer> mVertexBuffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mPerFrameCb;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mPerDrawCb;
-    std::vector<Microsoft::WRL::ComPtr<ID3D11Buffer>> mPerDrawCbRing;
-    size_t mPerDrawCbRingIndex = 0;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mPerPrimDepthCb;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mLightCb;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mTransformCb;

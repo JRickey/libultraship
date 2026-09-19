@@ -300,7 +300,6 @@ void GfxRenderingAPIDX11::Init() {
 
     ThrowIfFailed(mDevice->CreateBuffer(&constant_buffer_desc, nullptr, mPerDrawCb.GetAddressOf()),
                   mWindowBackend->GetWindowHandle(), "Failed to create per-draw constant buffer.");
-    mPerDrawCbRing.push_back(mPerDrawCb);
 
     // Create per-prim-depth constant buffer (G_ZS_PRIM), uploaded only when mPrimDepthDirty
 
@@ -1008,30 +1007,17 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         memcpy(mPerDrawCbData.lod_params, mCombinerUniforms.lod_params, sizeof(mPerDrawCbData.lod_params));
         memcpy(mPerDrawCbData.debug_tint, mCombinerUniforms.debug_tint, sizeof(mPerDrawCbData.debug_tint));
         memcpy(mPerDrawCbData.uCustom, mCustomUniforms.regs, sizeof(mPerDrawCbData.uCustom));
-
-        // Give every per-draw update in a frame its own buffer object. This
-        // diagnostic path isolates the submitted draws from one another and
-        // avoids relying on repeated WRITE_DISCARD renames of one buffer.
-        if (mPerDrawCbRingIndex >= mPerDrawCbRing.size()) {
-            D3D11_BUFFER_DESC perDrawDesc = {};
-            perDrawDesc.Usage = D3D11_USAGE_DYNAMIC;
-            perDrawDesc.ByteWidth = sizeof(PerDrawCB);
-            perDrawDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-            perDrawDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-            Microsoft::WRL::ComPtr<ID3D11Buffer> perDrawBuffer;
-            ThrowIfFailed(mDevice->CreateBuffer(&perDrawDesc, nullptr, perDrawBuffer.GetAddressOf()),
-                          mWindowBackend->GetWindowHandle(), "Failed to grow per-draw constant buffer ring.");
-            mPerDrawCbRing.push_back(perDrawBuffer);
-        }
-        mPerDrawCb = mPerDrawCbRing[mPerDrawCbRingIndex++];
-
         D3D11_MAPPED_SUBRESOURCE ms;
         ZeroMemory(&ms, sizeof(D3D11_MAPPED_SUBRESOURCE));
         mContext->Map(mPerDrawCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms);
         memcpy(ms.pData, &mPerDrawCbData, sizeof(PerDrawCB));
         mContext->Unmap(mPerDrawCb.Get(), 0);
 
-        // Bind the unique buffer version to both stages for this draw.
+        // D3D11_MAP_WRITE_DISCARD may rename a dynamic buffer. Re-assert the
+        // binding after the rename so both shader stages consume the version
+        // just populated for this draw. This is normally implicit in D3D11,
+        // but the Xbox UWP driver has shown intermittent use of later per-draw
+        // UV state for already-submitted indexed-background draws.
         ID3D11Buffer* perDrawBuffer = mPerDrawCb.Get();
         mContext->PSSetConstantBuffers(1, 1, &perDrawBuffer);
         mContext->VSSetConstantBuffers(1, 1, &perDrawBuffer);
@@ -1241,7 +1227,6 @@ void GfxRenderingAPIDX11::OnResize() {
 
 void GfxRenderingAPIDX11::StartFrame() {
     mDiagnosticFrameNumber++;
-    mPerDrawCbRingIndex = 0;
     // Set per-frame constant buffer
     ID3D11Buffer* buffers[3] = { mPerFrameCb.Get(), mPerDrawCb.Get(), mPerPrimDepthCb.Get() };
     mContext->PSSetConstantBuffers(0, 3, buffers);

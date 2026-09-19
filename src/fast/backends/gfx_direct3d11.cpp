@@ -923,6 +923,74 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         }
     }
 
+    // Paper Boat's map backdrops are 296x200 CI8 images. Log every actual draw
+    // of one (rather than only the first unique binding) so a one-frame palette
+    // or SRV leak can be matched exactly to a captured frame. PSGet* verifies
+    // the state held by the D3D context after our state cache has run.
+    if (mShaderProgram->usedTextures[0] && mShaderProgram->usedPalettes[0] &&
+        mCurrentTextureIds[0] < mTextures.size() && mCurrentTextureIds[SHADER_PALETTE_TEXTURE] < mTextures.size()) {
+        TextureData& indexTexture = mTextures[mCurrentTextureIds[0]];
+        if (indexTexture.width == 296 && indexTexture.height == 200) {
+            TextureData& paletteTexture = mTextures[mCurrentTextureIds[SHADER_PALETTE_TEXTURE]];
+            ID3D11ShaderResourceView* actualIndexSrv = nullptr;
+            ID3D11ShaderResourceView* actualPaletteSrv = nullptr;
+            mContext->PSGetShaderResources(0, 1, &actualIndexSrv);
+            mContext->PSGetShaderResources(SHADER_PALETTE_TEXTURE, 1, &actualPaletteSrv);
+
+            float minX = 0.0f;
+            float maxX = 0.0f;
+            float minY = 0.0f;
+            float maxY = 0.0f;
+            float minU = 0.0f;
+            float maxU = 0.0f;
+            float minV = 0.0f;
+            float maxV = 0.0f;
+            const size_t strideFloats = mShaderProgram->numFloats;
+            const size_t vertexCount = buf_vbo_num_tris * 3;
+            if (strideFloats >= 7 && vertexCount > 0 && buf_vbo_len >= strideFloats) {
+                minX = maxX = buf_vbo[0];
+                minY = maxY = buf_vbo[1];
+                minU = maxU = buf_vbo[5];
+                minV = maxV = buf_vbo[6];
+                for (size_t vertex = 1; vertex < vertexCount; vertex++) {
+                    const size_t base = vertex * strideFloats;
+                    if (base + 6 >= buf_vbo_len) {
+                        break;
+                    }
+                    minX = (std::min)(minX, buf_vbo[base]);
+                    maxX = (std::max)(maxX, buf_vbo[base]);
+                    minY = (std::min)(minY, buf_vbo[base + 1]);
+                    maxY = (std::max)(maxY, buf_vbo[base + 1]);
+                    minU = (std::min)(minU, buf_vbo[base + 5]);
+                    maxU = (std::max)(maxU, buf_vbo[base + 5]);
+                    minV = (std::min)(minV, buf_vbo[base + 6]);
+                    maxV = (std::max)(maxV, buf_vbo[base + 6]);
+                }
+            }
+
+            SPDLOG_INFO(
+                "[CI-BACKGROUND-DRAW-DIAG] frame={} tris={} index={}:{}:{:016x} palette={}:{}:{:016x} "
+                "expected_srvs={},{} cached_srvs={},{} actual_srvs={},{} pos=[{:.3f},{:.3f}]x[{:.3f},{:.3f}] "
+                "uv=[{:.3f},{:.3f}]x[{:.3f},{:.3f}]",
+                mDiagnosticFrameNumber, buf_vbo_num_tris, mCurrentTextureIds[0],
+                indexTexture.diagnostic_upload_generation, indexTexture.diagnostic_upload_hash,
+                mCurrentTextureIds[SHADER_PALETTE_TEXTURE], paletteTexture.diagnostic_upload_generation,
+                paletteTexture.diagnostic_upload_hash, static_cast<const void*>(indexTexture.resource_view.Get()),
+                static_cast<const void*>(paletteTexture.resource_view.Get()),
+                static_cast<const void*>(mLastResourceViews[0].Get()),
+                static_cast<const void*>(mLastResourceViews[SHADER_PALETTE_TEXTURE].Get()),
+                static_cast<const void*>(actualIndexSrv), static_cast<const void*>(actualPaletteSrv), minX, maxX, minY,
+                maxY, minU, maxU, minV, maxV);
+
+            if (actualIndexSrv != nullptr) {
+                actualIndexSrv->Release();
+            }
+            if (actualPaletteSrv != nullptr) {
+                actualPaletteSrv->Release();
+            }
+        }
+    }
+
     // Set per-draw constant buffer (texture metadata + combiner constants)
     if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty) {
         memcpy(mPerDrawCbData.combiner_inputs, mCombinerUniforms.inputs, sizeof(mPerDrawCbData.combiner_inputs));

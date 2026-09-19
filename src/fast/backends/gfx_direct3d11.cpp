@@ -926,6 +926,8 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         }
     }
 
+    bool diagnosticBackdropDraw = false;
+
     // Paper Boat's map backdrops are 296x200 CI8 images. Log every actual draw
     // of one (rather than only the first unique binding) so a one-frame palette
     // or SRV leak can be matched exactly to a captured frame. PSGet* verifies
@@ -934,6 +936,7 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         mCurrentTextureIds[0] < mTextures.size() && mCurrentTextureIds[SHADER_PALETTE_TEXTURE] < mTextures.size()) {
         TextureData& indexTexture = mTextures[mCurrentTextureIds[0]];
         if (indexTexture.width == 296 && indexTexture.height == 200) {
+            diagnosticBackdropDraw = true;
             TextureData& paletteTexture = mTextures[mCurrentTextureIds[SHADER_PALETTE_TEXTURE]];
             ID3D11ShaderResourceView* actualIndexSrv = nullptr;
             ID3D11ShaderResourceView* actualPaletteSrv = nullptr;
@@ -995,7 +998,7 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
     }
 
     // Set per-draw constant buffer (texture metadata + combiner constants)
-    if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty) {
+    if (textures_changed || mCombinerUniformsDirty || mCustomUniformsDirty || diagnosticBackdropDraw) {
         memcpy(mPerDrawCbData.combiner_inputs, mCombinerUniforms.inputs, sizeof(mPerDrawCbData.combiner_inputs));
         memcpy(mPerDrawCbData.fog_color, mCombinerUniforms.fog_color, sizeof(mPerDrawCbData.fog_color));
         memcpy(mPerDrawCbData.grayscale_color, mCombinerUniforms.grayscale_color,
@@ -1006,6 +1009,14 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
         memcpy(mPerDrawCbData.palette_params, mCombinerUniforms.palette_params, sizeof(mPerDrawCbData.palette_params));
         memcpy(mPerDrawCbData.lod_params, mCombinerUniforms.lod_params, sizeof(mPerDrawCbData.lod_params));
         memcpy(mPerDrawCbData.debug_tint, mCombinerUniforms.debug_tint, sizeof(mPerDrawCbData.debug_tint));
+        if (diagnosticBackdropDraw) {
+            // Diagnostic build only: bypass texture/palette sampling in the
+            // final output while preserving this draw's geometry and state.
+            mPerDrawCbData.debug_tint[0] = 1.0f;
+            mPerDrawCbData.debug_tint[1] = 0.0f;
+            mPerDrawCbData.debug_tint[2] = 1.0f;
+            mPerDrawCbData.debug_tint[3] = 1.0f;
+        }
         memcpy(mPerDrawCbData.uCustom, mCustomUniforms.regs, sizeof(mPerDrawCbData.uCustom));
         D3D11_MAPPED_SUBRESOURCE ms;
         ZeroMemory(&ms, sizeof(D3D11_MAPPED_SUBRESOURCE));
@@ -1210,6 +1221,11 @@ void GfxRenderingAPIDX11::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, siz
     }
 
     mContext->Draw(buf_vbo_num_tris * 3, 0);
+
+    // Restore the real per-draw tint before the next draw.
+    if (diagnosticBackdropDraw) {
+        mCombinerUniformsDirty = true;
+    }
 }
 
 void GfxRenderingAPIDX11::OnResize() {

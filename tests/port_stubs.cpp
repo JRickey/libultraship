@@ -14,6 +14,19 @@
 #include <cstddef>
 #include <cstdint>
 
+// Event ID storage is normally allocated by the consuming game's event
+// registration translation unit. The standalone test executable still links
+// the SDL backend that fires this event, so provide its unregistered default.
+extern "C" {
+uint32_t WindowFocusEventID = UINT32_MAX;
+}
+
+// BattleShip's optional GBI trace records Fast3D flush boundaries. Unit tests
+// do not enable that downstream tracer, but interpreter.cpp still references
+// its hook when linked into this standalone executable.
+extern "C" void gbi_trace_note_flush(int /*num_tris*/) {
+}
+
 extern "C" void* portRelocTryResolvePointer(uint32_t /*token*/) {
     return nullptr;
 }
